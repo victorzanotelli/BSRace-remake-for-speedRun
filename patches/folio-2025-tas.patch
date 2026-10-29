@@ -1,0 +1,1574 @@
+diff --git a/sources/Game/Game.js b/sources/Game/Game.js
+index 1a6acbd..ba843ca 100644
+--- a/sources/Game/Game.js
++++ b/sources/Game/Game.js
+@@ -126,7 +126,8 @@ export class Game
+         this.world = new World()
+ 
+         // Load and init RAPIER
+-        const rapierPromise = import('@dimforge/rapier3d')
++        // Mode TAS : version déterministe de Rapier (snapshots reproductibles, mêmes résultats sur toutes les machines)
++        const rapierPromise = window.__TAS__ ? import('@dimforge/rapier3d-deterministic') : import('@dimforge/rapier3d')
+ 
+         // Load rest of resources
+         const resourcesPromise = this.resourcesLoader.load(
+diff --git a/sources/Game/Rendering.js b/sources/Game/Rendering.js
+index f6b9f61..c6a5ff5 100644
+--- a/sources/Game/Rendering.js
++++ b/sources/Game/Rendering.js
+@@ -65,7 +65,8 @@ export class Rendering
+         }
+ 
+         // Make the renderer control the ticker
+-        this.renderer.setAnimationLoop((elapsedTime) => { this.game.ticker.update(elapsedTime) })
++        if(!window.__TAS__) // Mode TAS : le jeu n'avance que via tas.step()
++            this.renderer.setAnimationLoop((elapsedTime) => { this.game.ticker.update(elapsedTime) })
+ 
+         return this.renderer
+             .init()
+diff --git a/sources/Game/Tas.js b/sources/Game/Tas.js
+new file mode 100644
+index 0000000..549448b
+--- /dev/null
++++ b/sources/Game/Tas.js
+@@ -0,0 +1,652 @@
++/**
++ * Mode TAS (activé par "#tas" dans l'URL)
++ *
++ * Rend le jeu entièrement déterministe :
++ * - plus de boucle requestAnimationFrame : le jeu n'avance que via tas.step()
++ * - temps virtuel à pas fixe (60 images/s) pour le ticker, gsap et Date.now
++ * - Math.random à graine fixe
++ * - entrées du véhicule lues depuis un "movie" (une entrée par image)
++ *
++ * Doit être importé AVANT Game.js (voir index.js).
++ */
++import gsap from 'gsap'
++import seedrandom from 'seedrandom'
++import { TasEditor } from './TasEditor.js'
++
++const FPS = 60
++const BASE_DATE = Date.UTC(2026, 0, 15, 12, 0, 0) // date fixe (saison/jour constants)
++
++export const tas = {
++    active: /(^|[#&])tas\b/i.test(location.hash),
++    fps: FPS,
++    frame: 0,            // nombre d'images simulées depuis la prise de contrôle
++    render: false,       // dessiner chaque image (lent, utile pour la vidéo)
++    input: null,         // entrée courante { throttle, steer, boost, brake, jump, susp }
++    raceStartFrame: null,
++    log: null            // tableau optionnel d'états enregistrés
++}
++
++/**
++ * F9 : bascule jeu normal ⟷ éditeur TAS (rechargement complet de la page)
++ */
++window.addEventListener('keydown', (event) =>
++{
++    if(event.code !== 'F9' || event.repeat) return
++    event.preventDefault()
++    const debug = /(^|[#&])debug\b/i.test(location.hash) ? 'debug' : null
++    const toTas = !tas.active
++    const hash = [ debug, toTas ? 'tas&skip&editor' : null ].filter(Boolean).join('&')
++    location.href = location.pathname + `?mode=${toTas ? 'tas' : 'play'}` + (hash ? '#' + hash : '')
++}, true)
++if(/(^|[#&])editor\b/i.test(location.hash)) document.title = 'BS Folio Race — éditeur TAS'
++
++if(tas.active)
++{
++    window.__TAS__ = tas
++    window.tas = tas
++    tas.editorRequested = /(^|[#&])editor\b/i.test(location.hash)
++
++    // Hasard reproductible : une source pour le jeu (sauvegardée dans les savestates), une autre pour
++    // tout ce qui s'exécute hors des images (sons, interface) afin de ne pas perturber celle du jeu
++    let gameRandom = seedrandom('bs-folio-tas', { state: true })
++    const outsideRandom = seedrandom('bs-folio-tas-outside')
++    Math.random = gameRandom
++    tas.started = false
++
++    // Temps virtuel
++    let virtualMs = 0
++    Date.now = () => BASE_DATE + virtualMs
++
++    // Minuteries virtuelles : setTimeout/setInterval du jeu se déclenchent en temps virtuel, à l'intérieur
++    // des images (sinon elles s'intercaleraient en temps réel entre les images et rendraient le jeu non reproductible).
++    // Avant la première image, setTimeout reste réel (chargement) ; setInterval est toujours virtuel.
++    tas.real = {
++        setTimeout: window.setTimeout.bind(window),
++        clearTimeout: window.clearTimeout.bind(window),
++        setInterval: window.setInterval.bind(window),
++        clearInterval: window.clearInterval.bind(window)
++    }
++    const timers = new Map()
++    let timerId = 1e9
++    const addTimer = (callback, delay, args, repeat) =>
++    {
++        const id = ++timerId
++        delay = Math.max(0, Number(delay) || 0)
++        timers.set(id, { id, callback, args, time: virtualMs + (repeat ? Math.max(1, delay) : delay), interval: repeat ? Math.max(1, delay) : null })
++        return id
++    }
++    window.setTimeout = (callback, delay, ...args) =>
++    {
++        if(typeof callback !== 'function' || !tas.started) return tas.real.setTimeout(callback, delay, ...args)
++        return addTimer(callback, delay, args, false)
++    }
++    window.setInterval = (callback, delay, ...args) =>
++    {
++        if(typeof callback !== 'function') return tas.real.setInterval(callback, delay, ...args)
++        return addTimer(callback, delay, args, true)
++    }
++    window.clearTimeout = window.clearInterval = (id) =>
++    {
++        if(timers.has(id)) timers.delete(id)
++        else { tas.real.clearTimeout(id); tas.real.clearInterval(id) }
++    }
++    const runTimers = () =>
++    {
++        for(;;)
++        {
++            let next = null
++            for(const timer of timers.values())
++                if(timer.time <= virtualMs && (!next || timer.time < next.time || (timer.time === next.time && timer.id < next.id)))
++                    next = timer
++            if(!next) return
++            if(next.interval) next.time += next.interval
++            else timers.delete(next.id)
++            next.callback(...next.args)
++        }
++    }
++    tas.timers = timers
++
++    // gsap piloté à la main
++    gsap.ticker.remove(gsap.updateRoot)
++    gsap.ticker.lagSmoothing(0)
++    tas.gsap = gsap
++
++    /**
++     * Entrées "en direct" (clavier + manette) pour l'enregistrement, même logique que Player
++     */
++    tas.keys = new Set()
++    tas.liveInput = () =>
++    {
++        const on = (name) => (tas.keyMap?.[name] || []).some(code => tas.keys.has(code))
++        let throttle = 0, steer = 0
++        let boost = on('boost'), brake = on('brake'), jump = on('suspensions')
++        if(on('forward')) throttle += 1
++        if(on('backward')) throttle -= 1
++        if(on('right')) steer -= 1
++        if(on('left')) steer += 1
++        const parts = {
++            front: on('suspensionsFront'), back: on('suspensionsBack'), right: on('suspensionsRight'), left: on('suspensionsLeft'),
++            fl: on('suspensionsFrontLeft'), fr: on('suspensionsFrontRight'), br: on('suspensionsBackRight'), bl: on('suspensionsBackLeft')
++        }
++
++        // Manette (disposition standard) : stick gauche, R2/L2, rond = boost, carré = frein, triangle = saut
++        const pad = navigator.getGamepads ? [ ...navigator.getGamepads() ].find(Boolean) : null
++        if(pad)
++        {
++            const button = (i) => pad.buttons[i] ? pad.buttons[i].value : 0
++            const r2 = button(7), l2 = button(6)
++            if(throttle === 0 && (r2 > 0.05 || l2 > 0.05)) throttle = r2 - l2
++            const x = pad.axes[0] || 0
++            if(steer === 0 && Math.abs(x) > 0.15) steer = -Math.sign(x) * Math.min(1, (Math.abs(x) - 0.15) / 0.85)
++            boost = boost || button(1) > 0.5
++            brake = brake || button(2) > 0.5
++            jump = jump || button(3) > 0.5
++            parts.right = parts.right || button(5) > 0.5
++            parts.left = parts.left || button(4) > 0.5
++        }
++        if(brake) throttle = 0
++
++        const level = jump ? 'high' : 'mid'
++        const susp = [
++            jump || parts.front || parts.right || parts.fr,
++            jump || parts.front || parts.left || parts.fl,
++            jump || parts.back || parts.right || parts.br,
++            jump || parts.back || parts.left || parts.bl
++        ].map(active => active ? level : 'low')
++        return { throttle, steer, boost, brake, susp }
++    }
++
++    const game = () => window.game
++
++    /**
++     * Avance d'une image (ou n images)
++     */
++    tas.step = (count = 1) =>
++    {
++        const g = game()
++        tas.started = true
++        Math.random = tas.randomHook ? () => { tas.randomHook(); return gameRandom() } : gameRandom
++        try
++        {
++            for(let i = 0; i < count; i++)
++            {
++                tas.frame++
++                virtualMs = tas.frame * 1000 / FPS
++                runTimers()
++                gsap.updateRoot(virtualMs / 1000)
++                g.ticker.update(virtualMs)
++                if(tas.log && tas.raceStartFrame !== null)
++                    tas.log.push(tas.state())
++            }
++        }
++        finally
++        {
++            Math.random = outsideRandom
++        }
++        return tas.frame
++    }
++
++    /**
++     * Avance jusqu'à ce qu'une condition soit vraie (max images)
++     */
++    tas.stepUntil = (predicate, max = 60 * 60) =>
++    {
++        for(let i = 0; i < max; i++)
++        {
++            if(predicate()) return true
++            tas.step()
++        }
++        return predicate()
++    }
++
++    /**
++     * État courant (pour comparer les trajectoires)
++     */
++    tas.state = () =>
++    {
++        const g = game()
++        const body = g.physicalVehicle.chassis.physical.body
++        const t = body.translation()
++        const r = body.rotation()
++        const v = body.linvel()
++        const w = body.angvel()
++        const c = g.world.areas.circuit
++        return {
++            f: tas.frame - (tas.raceStartFrame ?? 0),
++            p: [ t.x, t.y, t.z ],
++            q: [ r.x, r.y, r.z, r.w ],
++            v: [ v.x, v.y, v.z ],
++            w: [ w.x, w.y, w.z ],
++            timer: c.timer.elapsedTime,
++            reached: c.checkpoints.reachedCount,
++            state: c.state
++        }
++    }
++
++    /**
++     * Savestates
++     *
++     * Physique : snapshot Rapier restauré "en place" (les objets JS du jeu gardent leurs références).
++     * Jeu : copie des valeurs simples (nombres, vecteurs, tableaux) des modules qui influencent la course.
++     * gsap ne se sauvegarde pas : un savestate n'est pris qu'à une image "sûre" (aucun délai
++     * influençant la course en attente) et, à la restauration, les animations créées depuis sont annulées.
++     */
++    const isVector = v => v && (v.isVector2 || v.isVector3 || v.isVector4 || v.isQuaternion || v.isEuler)
++    const isPlainArray = v => Array.isArray(v) && Object.keys(v).length === v.length && v.every(x => x === null || (typeof x !== 'object' && typeof x !== 'function') || isPlainArray(x))
++    const isPlainObject = v => v && Object.getPrototypeOf(v) === Object.prototype
++
++    const captureFields = (object, depth = 2, skip = []) =>
++    {
++        const out = {}
++        for(const key of Object.keys(object))
++        {
++            if(skip.includes(key)) continue
++            const value = object[key]
++            const type = typeof value
++            if(value === null || value === undefined || type === 'number' || type === 'boolean' || type === 'string')
++                out[key] = { t: 'p', v: value }
++            else if(isVector(value))
++                out[key] = { t: 'v', v: value.toArray() }
++            else if(isPlainArray(value))
++                out[key] = { t: 'a', v: structuredClone(value) }
++            else if(depth > 0 && isPlainObject(value))
++                out[key] = { t: 'o', v: captureFields(value, depth - 1) }
++        }
++        return out
++    }
++
++    const restoreFields = (object, saved) =>
++    {
++        for(const key in saved)
++        {
++            const { t, v } = saved[key]
++            if(t === 'p') object[key] = v
++            else if(t === 'v') object[key].fromArray(v)
++            else if(t === 'a') object[key] = structuredClone(v)
++            else if(t === 'o' && object[key]) restoreFields(object[key], v)
++        }
++    }
++
++    const restoreWorldInPlace = (world, bytes) =>
++    {
++        const RAPIER = game().RAPIER
++        const restored = RAPIER.World.restoreSnapshot(bytes)
++
++        // Composants "simples" : on échange les objets
++        for(const key of [ 'integrationParameters', 'islands', 'broadPhase', 'narrowPhase' ])
++        {
++            const old = world[key]
++            world[key] = restored[key]
++            restored[key] = old
++        }
++
++        // Ensembles référencés par le jeu : on échange uniquement les données internes
++        for(const key of [ 'bodies', 'colliders', 'impulseJoints', 'multibodyJoints' ])
++        {
++            const old = world[key].raw
++            world[key].raw = restored[key].raw
++            restored[key].raw = old
++        }
++        world.bodies.map.forEach(body => { body.rawSet = world.bodies.raw })
++
++        // Index de requêtes reconstruit à neuf (utilisé par les rayons des roues)
++        const oldQuery = world.queryPipeline.raw
++        world.queryPipeline.raw = restored.queryPipeline.raw
++        restored.queryPipeline.raw = oldQuery
++        world.queryPipeline.update(world.colliders)
++
++        restored.free()
++    }
++
++    /**
++     * Capture générique : toutes les valeurs simples atteignables depuis le jeu (nombres, booléens, chaînes,
++     * vecteurs, couleurs, uniforms des shaders, petits tableaux, caméras), sauf l'interface.
++     * Chaque valeur est notée avec une référence vers son objet : la restauration la réécrit à l'identique.
++     */
++    const DEEP_SKIP_TOP = new Set([ 'audio', 'notifications', 'modals', 'menu', 'achievements', 'server', 'debug', 'rendering',
++        'resourcesLoader', 'resources', 'viewport', 'quality', 'rayCursor', 'map', 'title', 'closingManager', 'konamiCode',
++        'monitoring', 'tabs', 'reveal', 'overlay', 'RAPIER', 'scene', 'domElement', 'canvasElement', 'physics', 'inputs', 'options' ])
++    const DEEP_SKIP_KEY = new Set([ 'game', 'events', 'callbacks', 'waits', 'parent', 'children', 'domElement', 'element', 'renderer' ])
++    const deepSkip = (o) =>
++        (typeof Node !== 'undefined' && o instanceof Node) || o === window ||
++        (o.isObject3D && !o.isCamera) || o.isMaterial || o.isBufferGeometry || o.isBufferAttribute || o.isInterleavedBuffer || o.isTexture || o.isRenderTarget ||
++        o.rawSet !== undefined || o.colliderSet !== undefined || (o.raw !== undefined && typeof o.free === 'function') ||
++        o._howls !== undefined || o._sounds !== undefined || (o.vars !== undefined && o._dur !== undefined) || o instanceof Set || o instanceof WeakMap ||
++        (ArrayBuffer.isView(o) && o.length > 256) || o instanceof ArrayBuffer || o instanceof Promise
++
++    const deepCapture = () =>
++    {
++        const entries = []
++        const seen = new Set()
++        const visit = (object, depth) =>
++        {
++            if(!object || typeof object !== 'object' || seen.has(object) || depth > 9) return
++            seen.add(object)
++            if(deepSkip(object)) return
++            if(object.isCamera)
++            {
++                for(const key of [ 'position', 'quaternion', 'rotation', 'scale', 'up' ]) entries.push([ object[key], null, 'v', object[key].toArray() ])
++                for(const key of [ 'zoom', 'fov', 'aspect', 'near', 'far' ]) if(typeof object[key] === 'number') entries.push([ object, key, 'p', object[key] ])
++                return
++            }
++            if(object instanceof Map) { for(const value of object.values()) visit(value, depth + 1); return }
++            if(ArrayBuffer.isView(object)) { entries.push([ object, null, 't', object.slice() ]); return }
++            for(const key of Object.keys(object))
++            {
++                if(DEEP_SKIP_KEY.has(key) || (depth === 0 && DEEP_SKIP_TOP.has(key))) continue
++                let value
++                try { value = object[key] } catch(e) { continue }
++                const type = typeof value
++                if(value === null || type === 'number' || type === 'boolean' || type === 'string')
++                    entries.push([ object, key, 'p', value ])
++                else if(type === 'object')
++                {
++                    if(isVector(value) || value.isColor || value.isMatrix3 || value.isMatrix4) { if(!seen.has(value)) { seen.add(value); entries.push([ value, null, 'v', value.toArray() ]) } }
++                    else if(value.isNode && 'value' in value)
++                    {
++                        const v = value.value
++                        if(typeof v === 'number' || typeof v === 'boolean') entries.push([ value, 'value', 'p', v ])
++                        else if(v && (isVector(v) || v.isColor || v.isMatrix3 || v.isMatrix4) && !seen.has(v)) { seen.add(v); entries.push([ v, null, 'v', v.toArray() ]) }
++                    }
++                    else if(isPlainArray(value)) entries.push([ object, key, 'a', structuredClone(value) ])
++                    else visit(value, depth + 1)
++                }
++            }
++        }
++        visit(game(), 0)
++        return entries
++    }
++
++    const deepRestore = (entries) =>
++    {
++        for(const [ object, key, kind, value ] of entries)
++        {
++            if(kind === 'p')
++            {
++                // Prudence : on n'écrase jamais un objet créé depuis par une valeur simple
++                const current = object[key]
++                if(current !== null && typeof current === 'object') continue
++                object[key] = value
++            }
++            else if(kind === 'v') object.fromArray(value)
++            else if(kind === 'a') object[key] = structuredClone(value)
++            else if(kind === 't') object.set(value)
++        }
++    }
++    tas.deepCapture = deepCapture
++
++    tas.isSafeFrame = () =>
++    {
++        const g = game()
++        const circuit = g.world.areas.circuit
++        return circuit.state === 3 &&
++            g.player.state === g.player.constructor.STATE_DEFAULT &&
++            !g.physicalVehicle.upsideDown.active &&
++            !g.player.unstuck.delay
++    }
++
++    tas.saveState = () =>
++    {
++        const g = game()
++        const circuit = g.world.areas.circuit
++        const vehicle = g.physicalVehicle
++        const checkpoints = circuit.checkpoints
++
++        return {
++            frame: tas.frame,
++            raceStartFrame: tas.raceStartFrame,
++            safe: tas.isSafeFrame(),
++            physics: g.physics.world.takeSnapshot(),
++            deep: deepCapture(),
++            rng: gameRandom.state(),
++            timers: [ ...timers.values() ].map(t => ({ ...t })),
++            gsapChildren: new Set(gsap.globalTimeline.getChildren(false, true, true)),
++            ticker: captureFields(g.ticker, 1, [ 'events', 'waits' ]),
++            tickerWaits: g.ticker.waits.map(w => [ ...w ]),
++            time: captureFields(g.time, 2),
++            vehicle: captureFields(vehicle, 2, [ 'wheels' ]),
++            wheels: {
++                inContactCount: vehicle.wheels.inContactCount,
++                justTouchedCount: vehicle.wheels.justTouchedCount,
++                items: vehicle.wheels.items.map(w => captureFields(w, 1))
++            },
++            player: captureFields(g.player, 1),
++            view: captureFields(g.view, 2),
++            objects: {
++                rounded: { ...g.objects.roundedViewPosition },
++                flags: [ ...g.objects.list.values() ].map(o => [ o.needsUpdate, o.reseting ])
++            },
++            circuit: {
++                state: circuit.state,
++                timer: captureFields(circuit.timer, 0),
++                isOut: circuit.bounds.isOut,
++                reachedCount: checkpoints.reachedCount,
++                timings: checkpoints.timings.slice(),
++                target: checkpoints.target ? checkpoints.target.index : null,
++                last: checkpoints.last ? checkpoints.last.index : null
++            },
++            input: tas.input
++        }
++    }
++
++    tas.loadState = (s) =>
++    {
++        const g = game()
++        const circuit = g.world.areas.circuit
++        const vehicle = g.physicalVehicle
++        const checkpoints = circuit.checkpoints
++
++        // gsap : annuler tout ce qui a été créé après le savestate, puis remettre l'horloge
++        for(const child of gsap.globalTimeline.getChildren(false, true, true))
++            if(!s.gsapChildren.has(child)) child.kill()
++        if(g.player.unstuck.delay && !s.gsapChildren.has(g.player.unstuck.delay)) g.player.unstuck.delay = null
++
++        tas.frame = s.frame
++        tas.raceStartFrame = s.raceStartFrame
++        virtualMs = tas.frame * 1000 / FPS
++        gsap.updateRoot(virtualMs / 1000)
++
++        // Physique
++        restoreWorldInPlace(g.physics.world, s.physics)
++
++        // Hasard et minuteries
++        gameRandom = seedrandom('', { state: s.rng })
++        timers.clear()
++        for(const t of s.timers) timers.set(t.id, { ...t })
++
++        // Jeu : capture générique d'abord, puis les champs spécifiques
++        deepRestore(s.deep)
++        restoreFields(g.ticker, s.ticker)
++        g.ticker.waits = s.tickerWaits.map(w => [ ...w ])
++        restoreFields(g.time, s.time)
++        g.time.scale = g.time._scale
++        restoreFields(vehicle, s.vehicle)
++        vehicle.wheels.inContactCount = s.wheels.inContactCount
++        vehicle.wheels.justTouchedCount = s.wheels.justTouchedCount
++        vehicle.wheels.items.forEach((w, i) => restoreFields(w, s.wheels.items[i]))
++        restoreFields(g.player, s.player)
++        restoreFields(g.view, s.view)
++        Object.assign(g.objects.roundedViewPosition, s.objects.rounded)
++        ;[ ...g.objects.list.values() ].forEach((o, i) => { if(s.objects.flags[i]) [ o.needsUpdate, o.reseting ] = s.objects.flags[i] })
++
++        circuit.state = s.circuit.state
++        restoreFields(circuit.timer, s.circuit.timer)
++        circuit.bounds.isOut = s.circuit.isOut
++        checkpoints.reachedCount = s.circuit.reachedCount
++        checkpoints.timings = s.circuit.timings.slice()
++        checkpoints.last = s.circuit.last === null ? null : checkpoints.items[s.circuit.last]
++        if(s.circuit.target === null) { checkpoints.target = null; checkpoints.doorTarget.mesh.visible = false }
++        else checkpoints.items[s.circuit.target].setTarget()
++
++        tas.input = s.input
++
++        // Visuel : objets recalés sur la physique
++        g.objects.list.forEach(o => { if(o.physical) o.needsUpdate = true })
++    }
++
++    /**
++     * Installation une fois le jeu chargé
++     */
++    tas.install = () =>
++    {
++        const g = game()
++        if(tas.installed) return
++        tas.installed = true
++
++        // Rendu facultatif
++        const originalRender = g.rendering.render.bind(g.rendering)
++        g.rendering.render = () => { if(tas.render) return originalRender() }
++        tas.renderOriginal = originalRender
++
++        // Isolation des entrées : en mode TAS, le jeu ne reçoit plus aucun événement clavier/souris/manette.
++        // (Sinon les effets annexes des touches — sons tirés au hasard, événements — rendraient
++        // l'enregistrement différent de la relecture.) Les touches sont lues ici et traduites en entrées du movie.
++        g.inputs.update = () => {}
++        const isEditorElement = (target) => target && target.closest && target.closest('.tas, .tas-help')
++        const isTextInput = (target) => target && target.matches && target.matches('input:not([type=range]), textarea, [contenteditable]')
++        window.addEventListener('keydown', (event) =>
++        {
++            if(tas.onKeyDown && tas.onKeyDown(event)) { event.preventDefault(); event.stopImmediatePropagation(); return }
++            if(isTextInput(event.target)) return
++            tas.keys.add(event.code)
++            if(/^(Arrow|Space|Page|Home|End|Tab)/.test(event.code) || event.code.startsWith('Numpad')) event.preventDefault()
++            event.stopImmediatePropagation()
++        }, true)
++        window.addEventListener('keyup', (event) =>
++        {
++            tas.keys.delete(event.code)
++            if(!isTextInput(event.target)) event.stopImmediatePropagation()
++        }, true)
++        window.addEventListener('blur', () => tas.keys.clear())
++        for(const type of [ 'mousedown', 'mousemove', 'mouseup', 'pointerdown', 'pointermove', 'pointerup', 'wheel', 'touchstart', 'touchmove', 'touchend', 'contextmenu', 'click', 'dblclick' ])
++            window.addEventListener(type, (event) =>
++            {
++                if(isEditorElement(event.target)) return
++                if(type === 'mouseup' && tas.onMouseUpOutside) tas.onMouseUpOutside()
++                event.stopImmediatePropagation()
++            }, true)
++
++        // Sons : leur déclenchement dépend de l'état du lecteur audio (déblocage, anti-répétition…), pas de la course.
++        // Leurs tirages au hasard (hauteur, choix du son) utilisent donc une source à part.
++        const isolateRandom = (fn) => function(...args)
++        {
++            const previous = Math.random
++            Math.random = outsideRandom
++            try { return fn.apply(this, args) }
++            finally { Math.random = previous }
++        }
++        const wrapItem = (item) => { if(item && typeof item.play === 'function' && !item.play.__tas) { item.play = isolateRandom(item.play); item.play.__tas = true } return item }
++        const wrapGroups = () => g.audio.groups.forEach(group =>
++        {
++            group.items.forEach(wrapItem)
++            for(const key of [ 'play', 'playRandomNext' ])
++                if(typeof group[key] === 'function' && !group[key].__tas) { group[key] = isolateRandom(group[key]); group[key].__tas = true }
++        })
++        wrapGroups()
++        const originalRegister = g.audio.register.bind(g.audio)
++        g.audio.register = (options) => { const item = originalRegister(options); wrapGroups(); return item }
++
++        // Correspondance touches → actions, reprise de la configuration du jeu
++        const codesOf = (name) => (g.inputs.actions.get(name)?.keys || []).filter(k => k.startsWith('Keyboard.')).map(k => k.slice(9))
++        tas.keyMap = {}
++        for(const name of [ 'forward', 'backward', 'left', 'right', 'boost', 'brake', 'suspensions', 'suspensionsFront', 'suspensionsBack', 'suspensionsRight', 'suspensionsLeft', 'suspensionsFrontLeft', 'suspensionsFrontRight', 'suspensionsBackRight', 'suspensionsBackLeft' ])
++            tas.keyMap[name] = codesOf(name)
++
++        // Entrées : on laisse Player calculer (verrouillage, etc.) puis on impose le movie
++        const originalPre = g.player.updatePrePhysics.bind(g.player)
++        g.player.updatePrePhysics = () =>
++        {
++            originalPre()
++
++            // Enregistrement : on capture les entrées réelles (clavier/manette) et on les rejoue
++            // par le même chemin que la lecture, pour que movie et run soient identiques
++            if(tas.captureLive)
++            {
++                const p = g.player
++                tas.captured = p.state === p.constructor.STATE_DEFAULT ? tas.liveInput() : null
++                tas.input = tas.captured
++            }
++
++            const input = tas.input
++            if(!input || g.player.state !== g.player.constructor.STATE_DEFAULT) return
++            g.player.accelerating = input.throttle ?? 0
++            g.player.steering = input.steer ?? 0
++            g.player.boosting = input.boost ? 1 : 0
++            g.player.braking = input.brake ? 1 : 0
++            if(g.player.braking) g.player.accelerating = 0
++            if(input.susp)
++                g.player.suspensions = input.susp.slice()
++            else
++                g.player.suspensions = input.jump ? [ 'high', 'high', 'high', 'high' ] : [ 'low', 'low', 'low', 'low' ]
++        }
++    }
++
++    /**
++     * Passe l'intro, lance la course et s'arrête sur la première image chronométrée
++     */
++    tas.startRace = () =>
++    {
++        const g = game()
++        tas.install()
++        tas.input = null
++        // Intro (avec "#skip" dans l'URL, elle s'enchaîne toute seule)
++        if(!tas.stepUntil(() => g.reveal.step >= 2, 60 * 60))
++            throw new Error('Intro non terminée : ajoutez "&skip" à l\'URL')
++        // Course
++        const circuit = g.world.areas.circuit
++        circuit.restart()
++        tas.stepUntil(() => circuit.timer.running, 60 * 30)
++        tas.raceStartFrame = tas.frame
++        return tas.state()
++    }
++
++    /**
++     * Joue un movie (tableau d'entrées, une par image) depuis le départ de la course
++     * Renvoie le résultat et, si demandé, la trajectoire complète
++     */
++    tas.playMovie = (movie, { record = true, stopAtFinish = true } = {}) =>
++    {
++        const circuit = game().world.areas.circuit
++        tas.log = record ? [ tas.state() ] : null
++        let finishFrame = null
++        for(let i = 0; i < movie.length; i++)
++        {
++            tas.input = movie[i]
++            tas.step()
++            if(finishFrame === null && circuit.state !== 3 && circuit.checkpoints.reachedCount >= circuit.checkpoints.count + 2)
++            {
++                finishFrame = i + 1
++                if(stopAtFinish) break
++            }
++        }
++        tas.input = null
++        const log = tas.log
++        tas.log = null
++        return {
++            finished: finishFrame !== null,
++            finishFrame,
++            time: finishFrame !== null ? circuit.timer.elapsedTime : null,
++            reached: circuit.checkpoints.reachedCount,
++            timings: circuit.checkpoints.timings.slice(),
++            final: tas.state(),
++            log
++        }
++    }
++
++    /**
++     * Éditeur (si "#tas&editor") : démarre dès que le jeu est chargé
++     */
++    if(tas.editorRequested)
++    {
++        const waitForGame = tas.real.setInterval(() =>
++        {
++            if(!window.game?.overlay) return
++            tas.real.clearInterval(waitForGame)
++            tas.real.setTimeout(() =>
++            {
++                tas.editor = new TasEditor(tas)
++                window.addEventListener('resize', () => tas.real.setTimeout(() => tas.renderOriginal && tas.renderOriginal(), 400))
++            }, 0)
++        }, 50)
++    }
++}
+diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
+new file mode 100644
+index 0000000..c00e781
+--- /dev/null
++++ b/sources/Game/TasEditor.js
+@@ -0,0 +1,872 @@
++/**
++ * Éditeur TAS intégré au jeu (mode "#tas&editor")
++ *
++ * - le movie commence à la première image chronométrée de la course (image 0)
++ * - "image courante" = prochaine image à jouer : l'état affiché est celui obtenu après les images 0 … courante-1
++ * - greenzone : savestates automatiques toutes les GREEN_INTERVAL images pour revenir en arrière instantanément
++ */
++import { Howler } from 'howler'
++
++const GREEN_INTERVAL = 20
++const GREEN_MAX = 300
++const ROWS_BEFORE = 10
++const ROWS_AFTER = 22
++const SPEEDS = [ 0.05, 0.1, 0.25, 0.5, 1, 2, 4 ]
++const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
++const STORAGE_KEY = 'bs-tas-autosave'
++
++const formatTime = (seconds) =>
++{
++    if(seconds === null || seconds === undefined || !isFinite(seconds)) return '--:--.---'
++    const ms = Math.floor(seconds * 1000 + 1e-6)
++    const m = Math.floor(ms / 60000)
++    const s = Math.floor(ms / 1000) % 60
++    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`
++}
++
++const sameInput = (a, b) =>
++    a.throttle === b.throttle && a.steer === b.steer && !!a.boost === !!b.boost && !!a.brake === !!b.brake &&
++    (a.susp ? a.susp.join() : '') === (b.susp ? b.susp.join() : '')
++
++const isAllLow = (susp) => !susp || susp.every(s => s === 'low')
++const JUMP = [ 'high', 'high', 'high', 'high' ]
++
++export class TasEditor
++{
++    constructor(tas)
++    {
++        this.tas = tas
++        this.game = window.game
++        this.circuit = this.game.world.areas.circuit
++
++        this.movie = []
++        this.greenzone = new Map()
++        this.playing = false
++        this.recording = false
++        this.speedIndex = SPEEDS.indexOf(1)
++        this.accumulator = 0
++        this.finish = null
++        this.dirty = false
++        this.paint = null
++        this.history = []
++        this.historyIndex = -1
++
++        this.disableGameShortcuts()
++        this.setStyle()
++        this.setDom()
++        this.start()
++        this.restoreAutosave()
++        this.setKeyboard()
++        this.loop = this.loop.bind(this)
++        this.lastTime = performance.now()
++        requestAnimationFrame(this.loop)
++
++        this.tas.real.setInterval(() => this.autosave(), 5000)
++        window.addEventListener('beforeunload', () => this.autosave())
++    }
++
++    /**
++     * Jeu
++     */
++    disableGameShortcuts()
++    {
++        // R (recommencer / respawn) : géré par l'éditeur
++        this.game.inputs.events.off('circuitRestart')
++        this.game.inputs.events.off('respawn')
++    }
++
++    get current()
++    {
++        return this.tas.frame - this.tas.raceStartFrame
++    }
++
++    inputAt(index)
++    {
++        return this.movie[index] || NEUTRAL
++    }
++
++    toTasInput(input)
++    {
++        return {
++            throttle: input.throttle,
++            steer: input.steer,
++            boost: !!input.boost,
++            brake: !!input.brake,
++            susp: input.susp ? input.susp.slice() : null
++        }
++    }
++
++    silent(callback)
++    {
++        Howler.mute(true)
++        const previousRender = this.tas.render
++        this.tas.render = false
++        try { callback() }
++        finally
++        {
++            this.tas.render = previousRender
++            Howler.mute(this.game.audio.mute.active)
++        }
++    }
++
++    renderNow()
++    {
++        this.tas.renderOriginal()
++    }
++
++    start()
++    {
++        this.silent(() => this.tas.startRace())
++        this.greenzone.set(0, this.tas.saveState())
++        this.renderNow()
++    }
++
++    /**
++     * Avance d'une image (lecture ou enregistrement)
++     */
++    stepOne(render)
++    {
++        const index = this.current
++
++        if(this.recording)
++        {
++            this.tas.captureLive = true
++            this.tas.input = null
++        }
++        else
++        {
++            if(index >= this.movie.length)
++                this.extendMovie(index + 1)
++            this.tas.input = this.toTasInput(this.inputAt(index))
++        }
++
++        this.tas.render = render
++        this.tas.step()
++        this.tas.render = false
++
++        if(this.recording)
++        {
++            this.tas.captureLive = false
++            const captured = this.tas.captured ? this.fromTasInput(this.tas.captured) : { ...NEUTRAL }
++            if(index >= this.movie.length) this.extendMovie(index)
++            if(!this.movie[index] || !sameInput(this.movie[index], captured))
++            {
++                this.pushHistory([ index ])
++                this.movie[index] = captured
++                this.invalidateAfter(index)
++                this.dirty = true
++            }
++        }
++
++        // Greenzone
++        const after = this.current
++        if(after % GREEN_INTERVAL === 0 && !this.greenzone.has(after) && this.tas.isSafeFrame())
++        {
++            this.greenzone.set(after, this.tas.saveState())
++            this.trimGreenzone()
++        }
++
++        // Arrivée
++        if(!this.finish && this.circuit.checkpoints.reachedCount >= this.circuit.checkpoints.count + 2)
++        {
++            this.finish = { frame: after, time: this.circuit.timer.elapsedTime, timings: this.circuit.checkpoints.timings.slice() }
++            this.playing = false
++            this.flash(`Arrivée : ${formatTime(this.finish.time)} (image ${after})`)
++        }
++    }
++
++    fromTasInput(input)
++    {
++        return {
++            throttle: input.throttle || 0,
++            steer: input.steer || 0,
++            boost: !!input.boost,
++            brake: !!input.brake,
++            susp: isAllLow(input.susp) ? null : input.susp.slice()
++        }
++    }
++
++    extendMovie(length)
++    {
++        while(this.movie.length < length)
++            this.movie.push({ ...NEUTRAL })
++    }
++
++    trimGreenzone()
++    {
++        if(this.greenzone.size <= GREEN_MAX) return
++        const current = this.current
++        const keys = [ ...this.greenzone.keys() ].filter(k => k !== 0).sort((a, b) => Math.abs(b - current) - Math.abs(a - current))
++        while(this.greenzone.size > GREEN_MAX)
++            this.greenzone.delete(keys.shift())
++    }
++
++    invalidateAfter(index)
++    {
++        for(const key of [ ...this.greenzone.keys() ])
++            if(key > index) this.greenzone.delete(key)
++        if(this.finish && this.finish.frame > index) this.finish = null
++    }
++
++    /**
++     * Aller à une image (restaure le savestate le plus proche puis rejoue sans affichage)
++     */
++    seek(target, { force = false, render = true } = {})
++    {
++        target = Math.max(0, Math.round(target))
++        const current = this.current
++        if(target === current && !force) return
++
++        const wasRecording = this.recording
++        this.recording = false
++
++        this.silent(() =>
++        {
++            // Point de départ : savestate le plus proche avant la cible (une image avant si possible, pour l'affichage)
++            const limit = target > 0 ? target - 1 : 0
++            let best = 0
++            for(const key of this.greenzone.keys())
++                if(key <= limit && key > best) best = key
++
++            const canContinue = !force && target > current && current >= best
++            if(!canContinue)
++                this.tas.loadState(this.greenzone.get(best))
++
++            while(this.current < target)
++                this.stepOne(false)
++        })
++
++        this.recording = wasRecording
++        if(render) this.renderNow()
++    }
++
++    resync(fromIndex)
++    {
++        this.invalidateAfter(fromIndex)
++        if(this.current > fromIndex)
++            this.seek(this.current, { force: true })
++    }
++
++    /**
++     * Édition
++     */
++    pushHistory(indices)
++    {
++        const entry = indices.map(i => [ i, this.movie[i] ? { ...this.movie[i] } : null ])
++        this.history.length = this.historyIndex + 1
++        this.history.push({ entry, length: this.movie.length })
++        if(this.history.length > 500) this.history.shift()
++        this.historyIndex = this.history.length - 1
++    }
++
++    undo()
++    {
++        if(this.historyIndex < 0) return
++        const { entry, length } = this.history[this.historyIndex]
++        const redo = entry.map(([ i ]) => [ i, this.movie[i] ? { ...this.movie[i] } : null ])
++        this.history[this.historyIndex] = { entry: redo, length: this.movie.length, undone: true }
++        this.historyIndex--
++        let min = Infinity
++        for(const [ i, value ] of entry)
++        {
++            min = Math.min(min, i)
++            if(value) this.movie[i] = value
++        }
++        this.movie.length = Math.max(length, 0)
++        this.extendMovie(length)
++        this.dirty = true
++        this.resync(isFinite(min) ? min : 0)
++        this.flash('Annulé')
++    }
++
++    redo()
++    {
++        if(this.historyIndex >= this.history.length - 1) return
++        this.historyIndex++
++        const { entry, length } = this.history[this.historyIndex]
++        const back = entry.map(([ i ]) => [ i, this.movie[i] ? { ...this.movie[i] } : null ])
++        this.history[this.historyIndex] = { entry: back, length: this.movie.length }
++        let min = Infinity
++        for(const [ i, value ] of entry)
++        {
++            min = Math.min(min, i)
++            if(value) this.movie[i] = value
++        }
++        this.movie.length = length
++        this.extendMovie(length)
++        this.dirty = true
++        this.resync(isFinite(min) ? min : 0)
++        this.flash('Rétabli')
++    }
++
++    setInputs(indices, patch, { resync = true } = {})
++    {
++        if(!indices.length) return
++        const max = Math.max(...indices)
++        this.extendMovie(max + 1)
++        this.pushHistory(indices)
++        for(const i of indices)
++            this.movie[i] = { ...this.movie[i], ...(typeof patch === 'function' ? patch(this.movie[i], i) : patch) }
++        this.dirty = true
++        if(resync) this.resync(Math.min(...indices))
++    }
++
++    insertFrame()
++    {
++        const index = this.current
++        this.pushHistory(Array.from({ length: Math.max(0, this.movie.length - index + 1) }, (_, k) => index + k))
++        this.movie.splice(index, 0, { ...NEUTRAL })
++        this.dirty = true
++        this.resync(index)
++        this.flash(`Image insérée à ${index}`)
++    }
++
++    deleteFrame()
++    {
++        const index = this.current
++        if(index >= this.movie.length) return
++        this.pushHistory(Array.from({ length: this.movie.length - index }, (_, k) => index + k))
++        this.movie.splice(index, 1)
++        this.dirty = true
++        this.resync(index)
++        this.flash(`Image ${index} supprimée`)
++    }
++
++    truncate()
++    {
++        const index = this.current
++        if(index >= this.movie.length) return
++        this.pushHistory(Array.from({ length: this.movie.length - index }, (_, k) => index + k))
++        this.movie.length = index
++        this.dirty = true
++        this.invalidateAfter(index)
++        this.flash(`Movie coupé après l'image ${index - 1}`)
++    }
++
++    /**
++     * Fichiers
++     */
++    serialize()
++    {
++        return {
++            format: 'bs-folio-tas-movie',
++            version: 1,
++            game: 'brunosimon/folio-2025',
++            fps: this.tas.fps,
++            result: this.finish ? { frames: this.finish.frame, time: this.finish.time, timings: this.finish.timings } : null,
++            inputs: this.movie.map(i => [ i.throttle, i.steer, i.boost ? 1 : 0, i.brake ? 1 : 0, i.susp ? i.susp.map(s => s[0]).join('') : '' ])
++        }
++    }
++
++    deserialize(data)
++    {
++        if(!data || data.format !== 'bs-folio-tas-movie' || !Array.isArray(data.inputs))
++            throw new Error('Fichier non reconnu (format bs-folio-tas-movie attendu)')
++        const map = { l: 'low', m: 'mid', h: 'high' }
++        return data.inputs.map(([ throttle, steer, boost, brake, susp ]) => ({
++            throttle: +throttle || 0,
++            steer: +steer || 0,
++            boost: !!boost,
++            brake: !!brake,
++            susp: susp && susp !== 'llll' ? [ ...susp ].map(c => map[c] || 'low') : null
++        }))
++    }
++
++    loadMovie(movie, label)
++    {
++        this.movie = movie
++        this.history = []
++        this.historyIndex = -1
++        this.finish = null
++        this.playing = false
++        this.recording = false
++        this.dirty = false
++        this.invalidateAfter(0)
++        this.seek(0, { force: true })
++        if(label) this.flash(label)
++    }
++
++    saveFile()
++    {
++        const blob = new Blob([ JSON.stringify(this.serialize()) ], { type: 'application/json' })
++        const link = document.createElement('a')
++        const time = this.finish ? '-' + formatTime(this.finish.time).replace(/[:.]/g, '') : ''
++        link.href = URL.createObjectURL(blob)
++        link.download = `bs-tas${time}.json`
++        link.click()
++        this.tas.real.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
++        this.flash('Movie enregistré')
++    }
++
++    openFile()
++    {
++        this.dom.file.value = ''
++        this.dom.file.click()
++    }
++
++    autosave()
++    {
++        if(!this.dirty) return
++        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.serialize())); this.dirty = false } catch(e) {}
++    }
++
++    restoreAutosave()
++    {
++        try
++        {
++            const raw = localStorage.getItem(STORAGE_KEY)
++            if(!raw) return
++            const movie = this.deserialize(JSON.parse(raw))
++            if(movie.length)
++            {
++                this.movie = movie
++                this.flash(`Movie précédent restauré (${movie.length} images)`)
++            }
++        }
++        catch(e) {}
++    }
++
++    /**
++     * Boucle temps réel
++     */
++    loop(time)
++    {
++        const delta = Math.min((time - this.lastTime) / 1000, 0.1)
++        this.lastTime = time
++
++        if(this.playing)
++        {
++            this.accumulator += delta * SPEEDS[this.speedIndex]
++            let count = Math.floor(this.accumulator * this.tas.fps)
++            this.accumulator -= count / this.tas.fps
++            count = Math.min(count, 8)
++            if(count > 0)
++            {
++                Howler.mute(this.game.audio.mute.active || SPEEDS[this.speedIndex] !== 1)
++                for(let i = 0; i < count && this.playing; i++)
++                    this.stepOne(i === count - 1)
++            }
++        }
++
++        this.updateDom()
++        requestAnimationFrame(this.loop)
++    }
++
++    togglePlay()
++    {
++        this.playing = !this.playing
++        this.accumulator = 0
++        if(!this.playing) this.renderNow()
++    }
++
++    frameAdvance()
++    {
++        this.playing = false
++        this.stepOne(true)
++    }
++
++    frameBack()
++    {
++        this.playing = false
++        if(this.current > 0) this.seek(this.current - 1)
++    }
++
++    toggleRecord()
++    {
++        this.recording = !this.recording
++        this.flash(this.recording ? 'Enregistrement : vos touches remplacent les entrées' : 'Lecture : les entrées du movie sont rejouées')
++    }
++
++    changeSpeed(direction)
++    {
++        this.speedIndex = Math.max(0, Math.min(SPEEDS.length - 1, this.speedIndex + direction))
++        this.flash(`Vitesse ×${SPEEDS[this.speedIndex]}`)
++    }
++
++    /**
++     * Clavier
++     */
++    setKeyboard()
++    {
++        // Appelé par Tas.js avant que la touche soit bloquée pour le jeu ; renvoie true si la touche est un raccourci
++        this.tas.onKeyDown = (event) =>
++        {
++            if(event.target && event.target.matches && event.target.matches('input:not([type=range])')) return false
++            const ctrl = event.ctrlKey || event.metaKey
++            const code = event.code
++
++            if(code === 'F1') this.toggleHelp()
++            else if(code === 'F2') { if(!event.repeat) this.togglePlay() }
++            else if(code === 'F3') this.frameBack()
++            else if(code === 'F4') this.frameAdvance()
++            else if(code === 'F5') { if(!event.repeat) this.toggleRecord() }
++            else if(code === 'F6') { this.playing = false; this.seek(0) }
++            else if(code === 'F7') this.changeSpeed(-1)
++            else if(code === 'F8') this.changeSpeed(1)
++            else if(ctrl && code === 'KeyZ' && !event.shiftKey) this.undo()
++            else if(ctrl && (code === 'KeyY' || (code === 'KeyZ' && event.shiftKey))) this.redo()
++            else if(ctrl && code === 'KeyS') this.saveFile()
++            else if(ctrl && code === 'KeyO') this.openFile()
++            else if(code === 'Insert') this.insertFrame()
++            else if(code === 'Delete') this.deleteFrame()
++            else return false
++            return true
++        }
++        this.tas.onMouseUpOutside = () => this.paintEnd()
++    }
++
++    /**
++     * Interface
++     */
++    setStyle()
++    {
++        const style = document.createElement('style')
++        style.textContent = /* css */`
++            .game, .modals, .menu { width: calc(100% - 340px) !important; }
++            .tas { --bg: rgba(12, 12, 22, 0.9); --line: rgba(255,255,255,0.12); --text: #e6e6f0; --muted: #9a9ab0; --accent: #32ffc1; --rec: #ff4d6d; --green: #7dff8a;
++                position: fixed; top: 0; right: 0; bottom: 0; width: 340px; z-index: 100000; background: var(--bg); color: var(--text);
++                font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; display: flex; flex-direction: column; user-select: none;
++                border-left: 1px solid var(--line); }
++            .tas * { box-sizing: border-box; }
++            .tas-head { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); }
++            .tas-title { display: flex; justify-content: space-between; align-items: center; font-weight: 700; letter-spacing: 0.04em; }
++            .tas-mode { padding: 2px 6px; border-radius: 3px; font-size: 11px; background: #333348; }
++            .tas-mode.is-play { background: var(--accent); color: #000; }
++            .tas-mode.is-rec { background: var(--rec); color: #fff; }
++            .tas-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; margin-top: 8px; }
++            .tas-stats b { color: var(--accent); font-weight: 600; }
++            .tas-finish { margin-top: 6px; color: var(--green); min-height: 16px; }
++            .tas-buttons { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
++            .tas button { font: inherit; color: var(--text); background: #262638; border: 1px solid var(--line); border-radius: 4px; padding: 4px 7px; cursor: pointer; }
++            .tas button:hover { background: #33334a; }
++            .tas button.is-on { background: var(--rec); border-color: var(--rec); }
++            .tas-timeline { padding: 6px 12px; border-bottom: 1px solid var(--line); }
++            .tas-timeline input { width: 100%; accent-color: var(--accent); }
++            .tas-roll { flex: 1; overflow: hidden; position: relative; }
++            .tas-row { display: grid; grid-template-columns: 52px 34px 1fr 30px 30px 44px; height: 19px; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); }
++            .tas-row > div { height: 100%; display: flex; align-items: center; justify-content: center; position: relative; }
++            .tas-row.is-head { color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); height: 22px; }
++            .tas-row.is-past { opacity: 0.55; }
++            .tas-row.is-current { background: rgba(50, 255, 193, 0.16); outline: 1px solid rgba(50,255,193,0.5); }
++            .tas-row.is-empty { color: #55556a; }
++            .tas-row.is-finish { box-shadow: inset 0 -2px 0 var(--green); }
++            .tas-row .num { justify-content: flex-end; padding-right: 6px; color: var(--muted); }
++            .tas-row .num.has-state::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--green); margin-right: 5px; }
++            .tas-row .cell { cursor: pointer; }
++            .tas-row .cell:hover { background: rgba(255,255,255,0.07); }
++            .tas-row .on-boost { color: #ffb84d; }
++            .tas-row .on-brake { color: var(--rec); }
++            .tas-row .on-jump { color: #6db7ff; }
++            .tas-steer { position: absolute; top: 4px; bottom: 4px; background: #6db7ff; opacity: 0.8; }
++            .tas-steer-axis { position: absolute; top: 2px; bottom: 2px; left: 50%; width: 1px; background: var(--line); }
++            .tas-steer-label { position: relative; font-size: 10px; color: #fff; text-shadow: 0 0 2px #000; }
++            .tas-flash { position: fixed; left: 50%; top: 18px; transform: translateX(calc(-50% - 170px)); background: rgba(0,0,0,0.75); color: #fff; padding: 6px 12px; border-radius: 4px;
++                font: 13px ui-monospace, Consolas, monospace; z-index: 100001; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
++            .tas-flash.is-visible { opacity: 1; }
++            .tas-help { position: fixed; inset: 0 340px 0 0; background: rgba(0,0,0,0.7); z-index: 100001; display: none; align-items: center; justify-content: center; }
++            .tas-help.is-visible { display: flex; }
++            .tas-help-box { background: #15151f; color: #e6e6f0; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 18px 22px; max-width: 560px;
++                font: 13px/1.5 ui-monospace, Consolas, monospace; }
++            .tas-help-box h2 { margin: 0 0 10px; font-size: 15px; color: #32ffc1; }
++            .tas-help-box td { padding: 2px 14px 2px 0; vertical-align: top; }
++            .tas-help-box td:first-child { color: #ffb84d; white-space: nowrap; }
++            .tas-footer { padding: 6px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
++        `
++        document.head.appendChild(style)
++        // La zone de jeu se réduit à gauche du panneau
++        window.dispatchEvent(new Event('resize'))
++    }
++
++    setDom()
++    {
++        const root = document.createElement('div')
++        root.className = 'tas'
++        root.innerHTML = /* html */`
++            <div class="tas-head">
++                <div class="tas-title"><span>TAS · Circuit</span><span class="tas-mode js-mode">PAUSE</span></div>
++                <div class="tas-stats">
++                    <div>Image <b class="js-frame">0</b></div>
++                    <div>Chrono <b class="js-timer">00:00.000</b></div>
++                    <div>Portes <b class="js-gates">0/9</b></div>
++                    <div>Vitesse <b class="js-speed">0.0</b></div>
++                    <div>Movie <b class="js-length">0</b> img</div>
++                    <div>Lecture <b class="js-playspeed">×1</b></div>
++                </div>
++                <div class="tas-finish js-finish"></div>
++            </div>
++            <div class="tas-buttons">
++                <button class="js-start" title="Retour au départ (F6)">⏮</button>
++                <button class="js-back" title="Image précédente (F3, maintenir pour rembobiner)">◀|</button>
++                <button class="js-play" title="Lecture / pause (F2)">▶</button>
++                <button class="js-next" title="Image suivante (F4, maintenir pour avancer)">|▶</button>
++                <button class="js-rec" title="Enregistrer vos touches (F5)">● REC</button>
++                <button class="js-slower" title="Plus lent (F7)">−</button>
++                <button class="js-faster" title="Plus rapide (F8)">+</button>
++                <button class="js-undo" title="Annuler (Ctrl+Z)">↶</button>
++                <button class="js-redo" title="Rétablir (Ctrl+Y)">↷</button>
++                <button class="js-insert" title="Insérer une image neutre ici (Inser)">+img</button>
++                <button class="js-delete" title="Supprimer l'image courante (Suppr)">−img</button>
++                <button class="js-truncate" title="Couper le movie après l'image courante">✂ fin</button>
++                <button class="js-save" title="Enregistrer le movie (Ctrl+S)">💾</button>
++                <button class="js-open" title="Ouvrir un movie (Ctrl+O)">📂</button>
++                <button class="js-help" title="Aide (F1)">?</button>
++            </div>
++            <div class="tas-timeline"><input class="js-timeline" type="range" min="0" max="0" value="0" step="1"></div>
++            <div class="tas-roll js-roll">
++                <div class="tas-row is-head"><div>#</div><div>Gaz</div><div>Direction (G ⟷ D)</div><div>Bst</div><div>Frn</div><div>Saut</div></div>
++                <div class="js-rows"></div>
++            </div>
++            <div class="tas-footer">Clic : modifier · glisser : peindre · molette : ±1 image (Maj : ±10) · clic droit sur Direction : 0</div>
++            <input class="js-file" type="file" accept=".json,application/json" hidden>
++        `
++        document.body.appendChild(root)
++
++        const flash = document.createElement('div')
++        flash.className = 'tas-flash'
++        document.body.appendChild(flash)
++
++        const help = document.createElement('div')
++        help.className = 'tas-help'
++        help.innerHTML = /* html */`
++            <div class="tas-help-box">
++                <h2>Éditeur TAS — raccourcis</h2>
++                <table>
++                    <tr><td>F2</td><td>Lecture / pause (à la vitesse choisie)</td></tr>
++                    <tr><td>F4</td><td>Image suivante (maintenir = avance image par image)</td></tr>
++                    <tr><td>F3</td><td>Image précédente (maintenir = rembobiner)</td></tr>
++                    <tr><td>F5</td><td>Enregistrement ON/OFF : vos touches (flèches/ZQSD, Maj, B, Espace…) sont écrites dans le movie à chaque image jouée</td></tr>
++                    <tr><td>F6</td><td>Retour au départ (image 0)</td></tr>
++                    <tr><td>F7 / F8</td><td>Ralentir / accélérer la lecture (×0.05 à ×4)</td></tr>
++                    <tr><td>Ctrl+Z / Ctrl+Y</td><td>Annuler / rétablir une modification</td></tr>
++                    <tr><td>Inser / Suppr</td><td>Insérer une image neutre / supprimer l'image courante</td></tr>
++                    <tr><td>Ctrl+S / Ctrl+O</td><td>Enregistrer / ouvrir un movie (.json)</td></tr>
++                    <tr><td>F9</td><td>Quitter le mode TAS (retour au jeu normal)</td></tr>
++                </table>
++                <p>Méthode classique : en pause, activez REC, maintenez les touches voulues et avancez avec F4. Revenez en arrière avec F3 pour corriger : la suite du movie est conservée, la course est recalculée exactement.</p>
++                <p>Le movie démarre à la première image chronométrée. Le chrono affiché est celui du jeu, à 60 images/s.</p>
++            </div>`
++        help.addEventListener('click', () => this.toggleHelp())
++        document.body.appendChild(help)
++
++        const $ = (selector) => root.querySelector(selector)
++        this.dom = {
++            root, flash, help,
++            mode: $('.js-mode'), frame: $('.js-frame'), timer: $('.js-timer'), gates: $('.js-gates'), speed: $('.js-speed'),
++            length: $('.js-length'), playspeed: $('.js-playspeed'), finish: $('.js-finish'),
++            play: $('.js-play'), rec: $('.js-rec'), timeline: $('.js-timeline'), roll: $('.js-roll'), rows: $('.js-rows'), file: $('.js-file')
++        }
++
++        // Le panneau ne doit pas transmettre ses événements au jeu
++        for(const type of [ 'pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mousemove', 'mouseup', 'wheel', 'touchstart', 'touchmove', 'contextmenu' ])
++            root.addEventListener(type, e => e.stopPropagation())
++
++        const on = (selector, callback) => $(selector).addEventListener('click', (e) => { callback(); e.currentTarget.blur() })
++        on('.js-start', () => { this.playing = false; this.seek(0) })
++        on('.js-back', () => this.frameBack())
++        on('.js-play', () => this.togglePlay())
++        on('.js-next', () => this.frameAdvance())
++        on('.js-rec', () => this.toggleRecord())
++        on('.js-slower', () => this.changeSpeed(-1))
++        on('.js-faster', () => this.changeSpeed(1))
++        on('.js-undo', () => this.undo())
++        on('.js-redo', () => this.redo())
++        on('.js-insert', () => this.insertFrame())
++        on('.js-delete', () => this.deleteFrame())
++        on('.js-truncate', () => this.truncate())
++        on('.js-save', () => this.saveFile())
++        on('.js-open', () => this.openFile())
++        on('.js-help', () => this.toggleHelp())
++
++        this.dom.file.addEventListener('change', async () =>
++        {
++            const file = this.dom.file.files[0]
++            if(!file) return
++            try
++            {
++                const movie = this.deserialize(JSON.parse(await file.text()))
++                this.loadMovie(movie, `Movie chargé : ${file.name} (${movie.length} images)`)
++            }
++            catch(error) { this.flash(`Erreur : ${error.message}`) }
++        })
++
++        // Timeline
++        let pendingSeek = null
++        this.dom.timeline.addEventListener('input', () =>
++        {
++            this.playing = false
++            if(pendingSeek === null)
++                requestAnimationFrame(() => { this.seek(pendingSeek); pendingSeek = null })
++            pendingSeek = Number(this.dom.timeline.value)
++        })
++
++        // Molette sur la liste : ±1 image (Maj : ±10)
++        this.dom.roll.addEventListener('wheel', (event) =>
++        {
++            event.preventDefault()
++            this.playing = false
++            const step = (event.shiftKey ? 10 : 1) * Math.sign(event.deltaY)
++            this.seek(this.current + step)
++        }, { passive: false })
++
++        // Peinture des entrées
++        this.dom.rows.addEventListener('mousedown', (event) => this.paintStart(event))
++        this.dom.rows.addEventListener('mouseover', (event) => this.paintMove(event))
++        window.addEventListener('mouseup', () => this.paintEnd())
++        this.dom.rows.addEventListener('contextmenu', (event) =>
++        {
++            event.preventDefault()
++            const cell = event.target.closest('.cell')
++            if(cell && cell.dataset.col === 'steer')
++                this.setInputs([ Number(cell.dataset.index) ], { steer: 0 })
++        })
++    }
++
++    cellValue(cell, event, existing)
++    {
++        const col = cell.dataset.col
++        if(col === 'steer')
++        {
++            const rect = cell.getBoundingClientRect()
++            let value = ((event.clientX - rect.left) / rect.width) * 2 - 1 // gauche → -1 ; droite → +1
++            value = -value // dans le jeu : +1 = gauche, -1 = droite
++            value = Math.round(value * 20) / 20
++            if(Math.abs(value) < 0.075) value = 0
++            return { steer: Math.max(-1, Math.min(1, value)) }
++        }
++        if(col === 'throttle')
++            return { throttle: existing.throttle > 0 ? 0 : existing.throttle < 0 ? 1 : -1 }
++        if(col === 'boost') return { boost: !existing.boost }
++        if(col === 'brake') return { brake: !existing.brake }
++        if(col === 'jump') return { susp: isAllLow(existing.susp) ? JUMP.slice() : null }
++        return null
++    }
++
++    paintStart(event)
++    {
++        if(event.button !== 0) return
++        const cell = event.target.closest('.cell')
++        if(!cell) return
++        this.playing = false
++        const index = Number(cell.dataset.index)
++        const value = this.cellValue(cell, event, this.inputAt(index))
++        if(!value) return
++        this.paint = { col: cell.dataset.col, value, min: index, indices: new Set([ index ]) }
++        this.applyPaint(index, cell, event)
++    }
++
++    paintMove(event)
++    {
++        if(!this.paint) return
++        const cell = event.target.closest('.cell')
++        if(!cell || cell.dataset.col !== this.paint.col) return
++        const index = Number(cell.dataset.index)
++        this.paint.indices.add(index)
++        this.paint.min = Math.min(this.paint.min, index)
++        this.applyPaint(index, cell, event)
++    }
++
++    applyPaint(index, cell, event)
++    {
++        // Direction : la valeur suit la souris ; autres colonnes : même valeur que le premier clic
++        const value = this.paint.col === 'steer' ? this.cellValue(cell, event, this.inputAt(index)) : this.paint.value
++        if(!this.paint.history) { this.paint.history = true }
++        this.extendMovie(index + 1)
++        if(!this.paint.saved) this.paint.saved = new Map()
++        if(!this.paint.saved.has(index)) this.paint.saved.set(index, { ...this.movie[index] })
++        this.movie[index] = { ...this.movie[index], ...value }
++        this.dirty = true
++        this.renderRows()
++    }
++
++    paintEnd()
++    {
++        if(!this.paint) return
++        const paint = this.paint
++        this.paint = null
++        // Historique : état d'avant la peinture
++        this.history.length = this.historyIndex + 1
++        this.history.push({ entry: [ ...paint.saved.entries() ].map(([ i, v ]) => [ i, v ]), length: this.movie.length })
++        this.historyIndex = this.history.length - 1
++        this.resync(paint.min)
++    }
++
++    toggleHelp()
++    {
++        this.dom.help.classList.toggle('is-visible')
++    }
++
++    flash(message)
++    {
++        this.dom.flash.textContent = message
++        this.dom.flash.classList.add('is-visible')
++        this.tas.real.clearTimeout(this.flashTimeout)
++        this.flashTimeout = this.tas.real.setTimeout(() => this.dom.flash.classList.remove('is-visible'), 2200)
++    }
++
++    updateDom()
++    {
++        const current = this.current
++        const circuit = this.circuit
++        const d = this.dom
++
++        d.mode.textContent = this.recording ? (this.playing ? 'REC ▶' : 'REC') : this.playing ? 'LECTURE' : 'PAUSE'
++        d.mode.className = 'tas-mode js-mode' + (this.recording ? ' is-rec' : this.playing ? ' is-play' : '')
++        d.frame.textContent = current
++        d.timer.textContent = formatTime(circuit.timer.elapsedTime)
++        d.gates.textContent = `${Math.min(circuit.checkpoints.reachedCount, 9)}/9`
++        d.speed.textContent = (this.game.physicalVehicle.speed || 0).toFixed(1)
++        d.length.textContent = this.movie.length
++        d.playspeed.textContent = `×${SPEEDS[this.speedIndex]}`
++        d.play.textContent = this.playing ? '⏸' : '▶'
++        d.rec.classList.toggle('is-on', this.recording)
++        d.finish.textContent = this.finish ? `🏁 Arrivée ${formatTime(this.finish.time)} · image ${this.finish.frame}` : ''
++
++        const max = Math.max(this.movie.length, current, 1)
++        if(Number(d.timeline.max) !== max) d.timeline.max = max
++        if(document.activeElement !== d.timeline) d.timeline.value = current
++
++        const key = `${current}|${this.movie.length}|${this.greenzone.size}|${this.finish ? this.finish.frame : -1}|${this.renderKey || 0}`
++        if(key !== this.lastRowsKey)
++        {
++            this.lastRowsKey = key
++            this.renderRows()
++        }
++    }
++
++    renderRows()
++    {
++        this.renderKey = (this.renderKey || 0) + 1
++        this.lastRowsKey = null
++        const current = this.current
++        const start = Math.max(0, current - ROWS_BEFORE)
++        const end = start + ROWS_BEFORE + ROWS_AFTER
++        let html = ''
++        for(let i = start; i < end; i++)
++        {
++            const exists = i < this.movie.length
++            const input = this.inputAt(i)
++            const classes = [ 'tas-row' ]
++            if(i < current) classes.push('is-past')
++            if(i === current) classes.push('is-current')
++            if(!exists) classes.push('is-empty')
++            if(this.finish && i === this.finish.frame - 1) classes.push('is-finish')
++
++            const throttle = input.throttle > 0 ? (input.throttle === 1 ? '▲' : input.throttle.toFixed(2)) : input.throttle < 0 ? (input.throttle === -1 ? '▼' : input.throttle.toFixed(2)) : '·'
++            const steer = input.steer
++            const width = Math.abs(steer) * 50
++            const left = steer > 0 ? 50 - width : 50 // +1 = gauche
++            const steerLabel = steer === 0 ? '' : `${steer > 0 ? 'G' : 'D'} ${Math.abs(steer).toFixed(2)}`
++            const susp = isAllLow(input.susp) ? '·' : input.susp.every(s => s === 'high') ? '⤒' : input.susp.map(s => s[0].toUpperCase()).join('')
++
++            html += `<div class="${classes.join(' ')}">` +
++                `<div class="num${this.greenzone.has(i) ? ' has-state' : ''}">${i}</div>` +
++                `<div class="cell" data-col="throttle" data-index="${i}">${throttle}</div>` +
++                `<div class="cell" data-col="steer" data-index="${i}"><span class="tas-steer-axis"></span>${steer ? `<span class="tas-steer" style="left:${left}%;width:${width}%"></span>` : ''}<span class="tas-steer-label">${steerLabel}</span></div>` +
++                `<div class="cell${input.boost ? ' on-boost' : ''}" data-col="boost" data-index="${i}">${input.boost ? '⚡' : '·'}</div>` +
++                `<div class="cell${input.brake ? ' on-brake' : ''}" data-col="brake" data-index="${i}">${input.brake ? '■' : '·'}</div>` +
++                `<div class="cell${isAllLow(input.susp) ? '' : ' on-jump'}" data-col="jump" data-index="${i}">${susp}</div>` +
++                `</div>`
++        }
++        this.dom.rows.innerHTML = html
++    }
++}
+diff --git a/sources/index.js b/sources/index.js
+index e82f637..6257d22 100644
+--- a/sources/index.js
++++ b/sources/index.js
+@@ -1,4 +1,5 @@
+ import './threejs-override.js'
++import './Game/Tas.js'
+ import { Game } from './Game/Game.js'
+ import consoleLog from './data/consoleLog.js'
+ 
