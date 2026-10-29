@@ -28,10 +28,10 @@ index f6b9f61..c6a5ff5 100644
              .init()
 diff --git a/sources/Game/Tas.js b/sources/Game/Tas.js
 new file mode 100644
-index 0000000..5615c83
+index 0000000..6adc7b3
 --- /dev/null
 +++ b/sources/Game/Tas.js
-@@ -0,0 +1,710 @@
+@@ -0,0 +1,711 @@
 +/**
 + * Mode TAS (activé par "#tas" dans l'URL)
 + *
@@ -610,8 +610,9 @@ index 0000000..5615c83
 +        for(const type of [ 'mousedown', 'mousemove', 'mouseup', 'pointerdown', 'pointermove', 'pointerup', 'wheel', 'touchstart', 'touchmove', 'touchend', 'contextmenu', 'click', 'dblclick' ])
 +            window.addEventListener(type, (event) =>
 +            {
++                // Relâchement du bouton : toujours signalé à l'éditeur (fin de la peinture), où qu'il ait lieu
++                if((type === 'mouseup' || type === 'pointerup') && tas.onMouseUp) tas.onMouseUp()
 +                if(isEditorElement(event.target)) return
-+                if(type === 'mouseup' && tas.onMouseUpOutside) tas.onMouseUpOutside()
 +                event.stopImmediatePropagation()
 +            }, true)
 +
@@ -744,10 +745,10 @@ index 0000000..5615c83
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..fe61afd
+index 0000000..92fcb87
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
-@@ -0,0 +1,1255 @@
+@@ -0,0 +1,1262 @@
 +/**
 + * Éditeur TAS intégré au jeu (mode "#tas&editor")
 + *
@@ -1062,6 +1063,7 @@ index 0000000..fe61afd
 +     */
 +    pushHistory(indices)
 +    {
++        this.rowsDirty = true
 +        const entry = indices.map(i => [ i, this.movie[i] ? { ...this.movie[i] } : null ])
 +        this.history.length = this.historyIndex + 1
 +        this.history.push({ entry, length: this.movie.length })
@@ -1111,6 +1113,7 @@ index 0000000..fe61afd
 +
 +    setInputs(indices, patch, { resync = true } = {})
 +    {
++        this.rowsDirty = true
 +        if(!indices.length) return
 +        const max = Math.max(...indices)
 +        this.extendMovie(max + 1)
@@ -1402,7 +1405,8 @@ index 0000000..fe61afd
 +            this.runAction(action, event)
 +            return true
 +        }
-+        this.tas.onMouseUpOutside = () => this.paintEnd()
++        this.tas.onMouseUp = () => this.paintEnd()
++        window.addEventListener('blur', () => this.paintEnd())
 +    }
 +
 +    matchesKey(binding, event)
@@ -1829,7 +1833,7 @@ index 0000000..fe61afd
 +
 +        // Peinture des entrées
 +        this.dom.rows.addEventListener('mousedown', (event) => this.paintStart(event))
-+        this.dom.rows.addEventListener('mouseover', (event) => this.paintMove(event))
++        window.addEventListener('mousemove', (event) => this.paintMove(event), true)
 +        window.addEventListener('mouseup', () => this.paintEnd())
 +        this.dom.rows.addEventListener('contextmenu', (event) =>
 +        {
@@ -1876,7 +1880,10 @@ index 0000000..fe61afd
 +    paintMove(event)
 +    {
 +        if(!this.paint) return
-+        const cell = event.target.closest('.cell')
++        // Sécurité : bouton déjà relâché (relâchement hors de la fenêtre, etc.)
++        if(event.buttons === 0) { this.paintEnd(); return }
++        const hovered = document.elementFromPoint(event.clientX, event.clientY)
++        const cell = hovered && hovered.closest && hovered.closest('.tas-row .cell')
 +        if(!cell || cell.dataset.col !== this.paint.col) return
 +        const index = Number(cell.dataset.index)
 +        this.paint.indices.add(index)
@@ -1894,7 +1901,7 @@ index 0000000..fe61afd
 +        if(!this.paint.saved.has(index)) this.paint.saved.set(index, { ...this.movie[index] })
 +        this.movie[index] = { ...this.movie[index], ...value }
 +        this.dirty = true
-+        this.renderRows()
++        this.rowsDirty = true
 +    }
 +
 +    paintEnd()
@@ -1958,18 +1965,19 @@ index 0000000..fe61afd
 +        if(Number(d.timeline.max) !== max) d.timeline.max = max
 +        if(document.activeElement !== d.timeline) d.timeline.value = current
 +
-+        const key = `${current}|${this.movie.length}|${this.greenzone.size}|${this.finish ? this.finish.frame : -1}|${this.renderKey || 0}`
-+        if(key !== this.lastRowsKey)
-+        {
-+            this.lastRowsKey = key
++        if(this.rowsDirty || this.rowsKey() !== this.lastRowsKey)
 +            this.renderRows()
-+        }
++    }
++
++    rowsKey()
++    {
++        return `${this.current}|${this.movie.length}|${this.greenzone.size}|${this.fineCache.size}|${this.finish ? this.finish.frame : -1}`
 +    }
 +
 +    renderRows()
 +    {
-+        this.renderKey = (this.renderKey || 0) + 1
-+        this.lastRowsKey = null
++        this.rowsDirty = false
++        this.lastRowsKey = this.rowsKey()
 +        const current = this.current
 +        const start = Math.max(0, current - ROWS_BEFORE)
 +        const end = start + ROWS_BEFORE + ROWS_AFTER
