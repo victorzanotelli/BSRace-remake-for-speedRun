@@ -11,7 +11,7 @@ Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https
 | Système | Fichier | Commande |
 |---|---|---|
 | Windows | `BS-Folio-Race-<version>-win-x64.zip` | dézipper, lancer `BS Folio Race.exe` |
-| Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) | autre variante pour seulement lancer la version tas `./BS-Folio-Race-1.1.0-x86_64.AppImage --appimage-extract-and-run --tas`
+| Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) |
 
 Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglages du jeu), `--webgpu` (Linux : tenter WebGPU au lieu de WebGL2).
 
@@ -24,11 +24,15 @@ En mode TAS, le jeu est **entièrement déterministe**. Les mêmes entrées donn
 - coupe le jeu du clavier, de la souris et de la manette : l'éditeur lit les touches lui-même et le jeu ne reçoit que les entrées du movie, par le même chemin en enregistrement et en relecture ;
 - utilise la version **déterministe** du moteur physique Rapier (`@dimforge/rapier3d-deterministic`, même version 0.17.3). Avec la version standard, recharger un savestate ne redonne pas exactement le même état. La version déterministe garantit aussi les mêmes résultats entre Windows et Linux. Le jeu normal (hors mode TAS) garde le Rapier d'origine.
 
-Le movie démarre à la **première image chronométrée** (fin du compte à rebours). Le chrono est celui du jeu.
+L'**image 0 est l'image du départ** : le chrono vaut 00:00.000 juste avant elle, et l'entrée 0 s'applique à l'image même où il démarre. Il avance ensuite de 1/60 s par image et correspond exactement au chrono du jeu.
+
+En lecture depuis l'image 0, ou dès que REC est actif, un **compte à rebours** (3, 2, 1, GO, avec bips) précède le départ, pour démarrer pile au bon moment. Sa durée se règle dans ⚙ (0 pour le désactiver).
 
 ### Raccourcis
 
-| Touche | Action |
+Tous les raccourcis de l'éditeur, ainsi que les touches de conduite utilisées en enregistrement, se modifient dans les **réglages** (bouton ⚙ ou F10) : « Modifier », puis appuyez sur la nouvelle touche. Une touche déjà prise est retirée de l'autre action. « Réinitialiser » rétablit les valeurs ci-dessous. Les lettres sont reconnues par leur caractère : Ctrl+Z fonctionne aussi en AZERTY.
+
+| Touche (par défaut) | Action |
 |---|---|
 | F2 | Lecture / pause (à la vitesse choisie) |
 | F4 | Image suivante (maintenir : avance image par image) |
@@ -39,8 +43,9 @@ Le movie démarre à la **première image chronométrée** (fin du compte à reb
 | Ctrl+Z / Ctrl+Y | Annuler / rétablir |
 | Inser / Suppr | Insérer une image neutre / supprimer l'image courante |
 | Ctrl+S / Ctrl+O | Enregistrer / ouvrir un movie (`.json`) |
-| F1 | Aide |
-| F9 | Retour au jeu normal |
+| F10 | Réglages (raccourcis, touches de conduite, compte à rebours) |
+| F1 | Aide (affiche les raccourcis actuels) |
+| F9 | Retour au jeu normal (non modifiable) |
 
 ### Édition à la souris
 
@@ -51,7 +56,7 @@ Chaque ligne de la liste correspond à une image : **Gaz** (▲ avant, ▼ arri�
 - Clic droit sur Direction : remettre à 0.
 - Molette : ±1 image (Maj : ±10). La barre de temps permet de sauter n'importe où.
 
-Quand vous modifiez une image passée, la course est **recalculée exactement** à partir du dernier savestate (un savestate est pris automatiquement toutes les 20 images, point vert dans la liste).
+Quand vous modifiez une image passée, la course est **recalculée exactement** à partir du dernier savestate. Un savestate est pris automatiquement toutes les 20 images (point vert dans la liste), et d'autres, plus rapprochés, autour du curseur pendant que vous rembobinez.
 
 ### Méthode conseillée
 
@@ -66,12 +71,13 @@ Le movie en cours est aussi sauvegardé automatiquement (et restauré au prochai
 
 ```json
 {
-  "format": "bs-folio-tas-movie", "version": 1, "game": "brunosimon/folio-2025", "fps": 60,
+  "format": "bs-folio-tas-movie", "version": 2, "game": "brunosimon/folio-2025", "fps": 60,
   "result": { "frames": 1652, "time": 27.533, "timings": [ … ] },
   "inputs": [ [ gaz, direction, boost, frein, "suspensions" ], … ]
 }
 ```
 
+- Version 2 : l'entrée 0 est celle de l'image du départ. Les movies en version 1 (éditeur 1.1.0) restent lisibles : une image neutre est ajoutée au début à l'ouverture, pour garder le même timing.
 - `gaz` : -1 à 1.
 - `direction` : -1 à 1 ; **+1 = gauche**, -1 = droite (convention du jeu).
 - `boost`, `frein` : 0 ou 1.

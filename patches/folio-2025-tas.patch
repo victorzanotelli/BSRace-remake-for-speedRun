@@ -28,10 +28,10 @@ index f6b9f61..c6a5ff5 100644
              .init()
 diff --git a/sources/Game/Tas.js b/sources/Game/Tas.js
 new file mode 100644
-index 0000000..549448b
+index 0000000..5615c83
 --- /dev/null
 +++ b/sources/Game/Tas.js
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,710 @@
 +/**
 + * Mode TAS (activé par "#tas" dans l'URL)
 + *
@@ -46,6 +46,7 @@ index 0000000..549448b
 +import gsap from 'gsap'
 +import seedrandom from 'seedrandom'
 +import { TasEditor } from './TasEditor.js'
++import { timeToRaceString } from './utilities/time.js'
 +
 +const FPS = 60
 +const BASE_DATE = Date.UTC(2026, 0, 15, 12, 0, 0) // date fixe (saison/jour constants)
@@ -208,6 +209,14 @@ index 0000000..549448b
 +                virtualMs = tas.frame * 1000 / FPS
 +                runTimers()
 +                gsap.updateRoot(virtualMs / 1000)
++                // Départ de la course piloté par le TAS : il a lieu au début de l'image, avant les entrées,
++                // pour que l'entrée 0 du movie s'applique à l'image même du départ
++                if(tas.pendingStart && tas.frame >= tas.pendingStart.frame)
++                {
++                    const start = tas.pendingStart
++                    tas.pendingStart = null
++                    start.callback()
++                }
 +                g.ticker.update(virtualMs)
 +                if(tas.log && tas.raceStartFrame !== null)
 +                    tas.log.push(tas.state())
@@ -348,7 +357,7 @@ index 0000000..549448b
 +        o._howls !== undefined || o._sounds !== undefined || (o.vars !== undefined && o._dur !== undefined) || o instanceof Set || o instanceof WeakMap ||
 +        (ArrayBuffer.isView(o) && o.length > 256) || o instanceof ArrayBuffer || o instanceof Promise
 +
-+    const deepCapture = () =>
++    const collectEntries = () =>
 +    {
 +        const entries = []
 +        const seen = new Set()
@@ -391,10 +400,36 @@ index 0000000..549448b
 +        return entries
 +    }
 +
-+    const deepRestore = (entries) =>
++    let deepSchema = null
++    tas.resetDeepSchema = () => { deepSchema = null }
++    const SKIP = Symbol('skip')
++    const deepCapture = () =>
 +    {
-+        for(const [ object, key, kind, value ] of entries)
++        if(!deepSchema)
 +        {
++            const entries = collectEntries()
++            deepSchema = entries.map(([ object, key, kind ]) => [ object, key, kind ])
++            return { schema: deepSchema, values: entries.map(entry => entry[3]) }
++        }
++        const values = new Array(deepSchema.length)
++        for(let i = 0; i < deepSchema.length; i++)
++        {
++            const [ object, key, kind ] = deepSchema[i]
++            if(kind === 'p') { const v = object[key]; values[i] = (v !== null && typeof v === 'object') ? SKIP : v }
++            else if(kind === 'v') values[i] = object.toArray()
++            else if(kind === 'a') values[i] = isPlainArray(object[key]) ? structuredClone(object[key]) : SKIP
++            else values[i] = object.slice()
++        }
++        return { schema: deepSchema, values }
++    }
++
++    const deepRestore = ({ schema, values }) =>
++    {
++        for(let i = 0; i < schema.length; i++)
++        {
++            const [ object, key, kind ] = schema[i]
++            const value = values[i]
++            if(value === SKIP) continue
 +            if(kind === 'p')
 +            {
 +                // Prudence : on n'écrase jamais un objet créé depuis par une valeur simple
@@ -413,10 +448,13 @@ index 0000000..549448b
 +    {
 +        const g = game()
 +        const circuit = g.world.areas.circuit
-+        return circuit.state === 3 &&
-+            g.player.state === g.player.constructor.STATE_DEFAULT &&
-+            !g.physicalVehicle.upsideDown.active &&
-+            !g.player.unstuck.delay
++        // Délai de redressement réellement en attente (le jeu l'annule sans le remettre à null)
++        const delay = g.player.unstuck.delay
++        const unstuckPending = !!(delay && delay.parent && delay.progress() < 1)
++        const racing = g.player.state === g.player.constructor.STATE_DEFAULT && !g.physicalVehicle.upsideDown.active && !unstuckPending
++        // Juste avant le départ : seul le départ (piloté par le TAS) est en attente
++        const preStart = !!tas.pendingStart && g.player.state !== g.player.constructor.STATE_DEFAULT
++        return circuit.state === 3 && (racing || preStart)
 +    }
 +
 +    tas.saveState = () =>
@@ -459,7 +497,8 @@ index 0000000..549448b
 +                target: checkpoints.target ? checkpoints.target.index : null,
 +                last: checkpoints.last ? checkpoints.last.index : null
 +            },
-+            input: tas.input
++            input: tas.input,
++            pendingStart: tas.pendingStart ? { ...tas.pendingStart } : null
 +        }
 +    }
 +
@@ -513,6 +552,11 @@ index 0000000..549448b
 +        else checkpoints.items[s.circuit.target].setTarget()
 +
 +        tas.input = s.input
++        tas.pendingStart = s.pendingStart ? { ...s.pendingStart } : null
++
++        // Chrono 3D (sa texture n'est redessinée que quand il tourne)
++        if(circuit.timer.running) circuit.timer.write(timeToRaceString(circuit.timer.elapsedTime))
++        else if(circuit.state === 3) circuit.timer.write('00:00:000')
 +
 +        // Visuel : objets recalés sur la physique
 +        g.objects.list.forEach(o => { if(o.physical) o.needsUpdate = true })
@@ -531,6 +575,17 @@ index 0000000..549448b
 +        const originalRender = g.rendering.render.bind(g.rendering)
 +        g.rendering.render = () => { if(tas.render) return originalRender() }
 +        tas.renderOriginal = originalRender
++
++        // Départ : le compte à rebours du jeu (gsap) reste visible, mais c'est le TAS qui déclenche
++        // le départ, à une image exacte (3 × 2 s à vitesse ×2 = 3 s = 180 images)
++        const circuit = g.world.areas.circuit
++        const originalStartAnimation = circuit.startAnimation.start
++        circuit.startAnimation.start = (endCallback) =>
++        {
++            originalStartAnimation(null)
++            const seconds = circuit.startAnimation.interDuration * 3 / g.time.defaultScale
++            tas.pendingStart = { frame: tas.frame + Math.round(seconds * FPS), callback: endCallback }
++        }
 +
 +        // Isolation des entrées : en mode TAS, le jeu ne reçoit plus aucun événement clavier/souris/manette.
 +        // (Sinon les effets annexes des touches — sons tirés au hasard, événements — rendraient
@@ -616,7 +671,7 @@ index 0000000..549448b
 +    }
 +
 +    /**
-+     * Passe l'intro, lance la course et s'arrête sur la première image chronométrée
++     * Passe l'intro, lance la course et s'arrête juste avant l'image du départ (image 0 du movie)
 +     */
 +    tas.startRace = () =>
 +    {
@@ -628,9 +683,12 @@ index 0000000..549448b
 +            throw new Error('Intro non terminée : ajoutez "&skip" à l\'URL')
 +        // Course
 +        const circuit = g.world.areas.circuit
++        tas.pendingStart = null
 +        circuit.restart()
-+        tas.stepUntil(() => circuit.timer.running, 60 * 30)
++        // On s'arrête juste avant l'image du départ : l'image 0 du movie est celle où le chrono démarre
++        tas.stepUntil(() => tas.pendingStart && tas.frame + 1 >= tas.pendingStart.frame, 60 * 30)
 +        tas.raceStartFrame = tas.frame
++        tas.resetDeepSchema()
 +        return tas.state()
 +    }
 +
@@ -686,16 +744,18 @@ index 0000000..549448b
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..c00e781
+index 0000000..fe61afd
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,1255 @@
 +/**
 + * Éditeur TAS intégré au jeu (mode "#tas&editor")
 + *
-+ * - le movie commence à la première image chronométrée de la course (image 0)
-+ * - "image courante" = prochaine image à jouer : l'état affiché est celui obtenu après les images 0 … courante-1
-+ * - greenzone : savestates automatiques toutes les GREEN_INTERVAL images pour revenir en arrière instantanément
++ * - image 0 = l'image du départ : le chrono démarre à cette image et l'entrée 0 s'y applique
++ * - "image courante" = prochaine image à jouer : l'état affiché est celui obtenu après les images 0 … courante-1,
++ *   le chrono vaut donc courante / 60 (00:00.000 à l'image 0)
++ * - greenzone : savestates automatiques toutes les GREEN_INTERVAL images pour revenir en arrière instantanément,
++ *   plus un petit cache de savestates rapprochés autour du curseur pour rembobiner image par image en douceur
 + */
 +import { Howler } from 'howler'
 +
@@ -706,6 +766,39 @@ index 0000000..c00e781
 +const SPEEDS = [ 0.05, 0.1, 0.25, 0.5, 1, 2, 4 ]
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
++const SETTINGS_KEY = 'bs-tas-settings'
++const FINE_INTERVAL = 5
++const FINE_MAX = 12
++
++// Actions de l'éditeur et raccourcis par défaut. Les lettres sont reconnues par leur caractère
++// (Ctrl+Z reste Ctrl+Z en AZERTY), les autres touches par leur position (code).
++const EDITOR_ACTIONS = [
++    [ 'help', 'Aide', { code: 'F1' } ],
++    [ 'play', 'Lecture / pause', { code: 'F2' } ],
++    [ 'back', 'Image précédente (maintenir : rembobiner)', { code: 'F3' } ],
++    [ 'next', 'Image suivante (maintenir : avancer)', { code: 'F4' } ],
++    [ 'rec', 'Enregistrement ON/OFF', { code: 'F5' } ],
++    [ 'start', 'Retour au départ (image 0)', { code: 'F6' } ],
++    [ 'slower', 'Ralentir la lecture', { code: 'F7' } ],
++    [ 'faster', 'Accélérer la lecture', { code: 'F8' } ],
++    [ 'settings', 'Réglages', { code: 'F10' } ],
++    [ 'undo', 'Annuler', { code: 'KeyZ', key: 'z', ctrl: true } ],
++    [ 'redo', 'Rétablir', { code: 'KeyY', key: 'y', ctrl: true } ],
++    [ 'save', 'Enregistrer le movie', { code: 'KeyS', key: 's', ctrl: true } ],
++    [ 'open', 'Ouvrir un movie', { code: 'KeyO', key: 'o', ctrl: true } ],
++    [ 'insert', 'Insérer une image neutre', { code: 'Insert' } ],
++    [ 'delete', 'Supprimer l\'image courante', { code: 'Delete' } ]
++]
++const NO_REPEAT = new Set([ 'help', 'play', 'rec', 'start', 'settings', 'save', 'open' ])
++const DRIVING_ACTIONS = [
++    [ 'forward', 'Avancer' ], [ 'backward', 'Reculer' ], [ 'left', 'Gauche' ], [ 'right', 'Droite' ],
++    [ 'boost', 'Boost' ], [ 'brake', 'Frein' ], [ 'suspensions', 'Saut' ]
++]
++const KEY_NAMES = {
++    ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Space: 'Espace', ShiftLeft: 'Maj gauche', ShiftRight: 'Maj droite',
++    ControlLeft: 'Ctrl gauche', ControlRight: 'Ctrl droite', AltLeft: 'Alt', AltRight: 'Alt Gr', Insert: 'Inser', Delete: 'Suppr',
++    Enter: 'Entrée', Backspace: 'Retour arrière', Tab: 'Tab', Escape: 'Échap', PageUp: 'Pg préc', PageDown: 'Pg suiv', Home: 'Début', End: 'Fin'
++}
 +
 +const formatTime = (seconds) =>
 +{
@@ -742,7 +835,12 @@ index 0000000..c00e781
 +        this.paint = null
 +        this.history = []
 +        this.historyIndex = -1
++        this.fineCache = new Map()
++        this.countdown = null
++        this.capture = null
 +
++        this.tas.install()
++        this.loadSettings()
 +        this.disableGameShortcuts()
 +        this.setStyle()
 +        this.setDom()
@@ -893,10 +991,20 @@ index 0000000..c00e781
 +            this.greenzone.delete(keys.shift())
 +    }
 +
++    trimFineCache()
++    {
++        if(this.fineCache.size <= FINE_MAX) return
++        const current = this.current
++        const keys = [ ...this.fineCache.keys() ].sort((a, b) => Math.abs(b - current) - Math.abs(a - current))
++        while(this.fineCache.size > FINE_MAX) this.fineCache.delete(keys.shift())
++    }
++
 +    invalidateAfter(index)
 +    {
 +        for(const key of [ ...this.greenzone.keys() ])
 +            if(key > index) this.greenzone.delete(key)
++        for(const key of [ ...this.fineCache.keys() ])
++            if(key > index) this.fineCache.delete(key)
 +        if(this.finish && this.finish.frame > index) this.finish = null
 +    }
 +
@@ -916,16 +1024,26 @@ index 0000000..c00e781
 +        {
 +            // Point de départ : savestate le plus proche avant la cible (une image avant si possible, pour l'affichage)
 +            const limit = target > 0 ? target - 1 : 0
-+            let best = 0
-+            for(const key of this.greenzone.keys())
-+                if(key <= limit && key > best) best = key
++            let best = 0, bestState = this.greenzone.get(0)
++            for(const [ key, state ] of this.greenzone)
++                if(key <= limit && key > best) { best = key; bestState = state }
++            for(const [ key, state ] of this.fineCache)
++                if(key <= limit && key > best) { best = key; bestState = state }
 +
 +            const canContinue = !force && target > current && current >= best
 +            if(!canContinue)
-+                this.tas.loadState(this.greenzone.get(best))
++                this.tas.loadState(bestState)
 +
++            // En rejouant, on garde des savestates rapprochés juste avant la cible : le prochain retour
++            // d'une image n'aura presque rien à recalculer
 +            while(this.current < target)
++            {
 +                this.stepOne(false)
++                const index = this.current
++                if(index < target && index > target - FINE_INTERVAL * 5 && index % FINE_INTERVAL === 0 && !this.greenzone.has(index) && !this.fineCache.has(index) && this.tas.isSafeFrame())
++                    this.fineCache.set(index, this.tas.saveState())
++            }
++            this.trimFineCache()
 +        })
 +
 +        this.recording = wasRecording
@@ -1042,7 +1160,7 @@ index 0000000..c00e781
 +    {
 +        return {
 +            format: 'bs-folio-tas-movie',
-+            version: 1,
++            version: 2, // v2 : l'image 0 est l'image du départ (v1 : l'image suivante)
 +            game: 'brunosimon/folio-2025',
 +            fps: this.tas.fps,
 +            result: this.finish ? { frames: this.finish.frame, time: this.finish.time, timings: this.finish.timings } : null,
@@ -1055,13 +1173,16 @@ index 0000000..c00e781
 +        if(!data || data.format !== 'bs-folio-tas-movie' || !Array.isArray(data.inputs))
 +            throw new Error('Fichier non reconnu (format bs-folio-tas-movie attendu)')
 +        const map = { l: 'low', m: 'mid', h: 'high' }
-+        return data.inputs.map(([ throttle, steer, boost, brake, susp ]) => ({
++        const movie = data.inputs.map(([ throttle, steer, boost, brake, susp ]) => ({
 +            throttle: +throttle || 0,
 +            steer: +steer || 0,
 +            boost: !!boost,
 +            brake: !!brake,
 +            susp: susp && susp !== 'llll' ? [ ...susp ].map(c => map[c] || 'low') : null
 +        }))
++        // Movies v1 (éditeur 1.1.0) : leur image 0 tombait une image après le départ
++        if((data.version || 1) < 2) movie.unshift({ ...NEUTRAL })
++        return movie
 +    }
 +
 +    loadMovie(movie, label)
@@ -1126,6 +1247,8 @@ index 0000000..c00e781
 +        const delta = Math.min((time - this.lastTime) / 1000, 0.1)
 +        this.lastTime = time
 +
++        if(this.countdown) this.updateCountdown(performance.now())
++
 +        if(this.playing)
 +        {
 +            this.accumulator += delta * SPEEDS[this.speedIndex]
@@ -1146,21 +1269,101 @@ index 0000000..c00e781
 +
 +    togglePlay()
 +    {
-+        this.playing = !this.playing
-+        this.accumulator = 0
-+        if(!this.playing) this.renderNow()
++        // Pendant le compte à rebours : annule
++        if(this.countdown) { this.stopCountdown(); this.flash('Départ annulé'); return }
++
++        if(this.playing)
++        {
++            this.playing = false
++            this.renderNow()
++            return
++        }
++
++        // Compte à rebours avant de partir en enregistrement, ou depuis l'image 0
++        if(this.settings.countdown > 0 && (this.recording || this.current === 0))
++            this.startCountdown()
++        else
++        {
++            this.playing = true
++            this.accumulator = 0
++        }
++    }
++
++    startCountdown()
++    {
++        const now = performance.now()
++        this.countdown = { end: now + this.settings.countdown * 1000, shown: null }
++        this.dom.countdown.classList.add('is-visible')
++        this.updateCountdown(now)
++    }
++
++    stopCountdown()
++    {
++        this.countdown = null
++        this.dom.countdown.classList.remove('is-visible', 'is-go')
++    }
++
++    updateCountdown(now)
++    {
++        const remaining = (this.countdown.end - now) / 1000
++        if(remaining <= 0)
++        {
++            this.stopCountdown()
++            this.dom.countdown.textContent = 'GO'
++            this.dom.countdown.classList.add('is-visible', 'is-go')
++            this.tas.real.setTimeout(() => { if(!this.countdown) this.dom.countdown.classList.remove('is-visible', 'is-go') }, 600)
++            this.beep(1320, 0.35)
++            this.playing = true
++            this.accumulator = 0
++            return
++        }
++        const shown = Math.ceil(remaining)
++        if(shown !== this.countdown.shown)
++        {
++            this.countdown.shown = shown
++            this.dom.countdown.textContent = shown
++            this.beep(880, 0.12)
++        }
++    }
++
++    beep(frequency, duration)
++    {
++        if(!this.settings.beep) return
++        try
++        {
++            this.audioContext ||= new (window.AudioContext || window.webkitAudioContext)()
++            const context = this.audioContext
++            const oscillator = context.createOscillator()
++            const gain = context.createGain()
++            oscillator.frequency.value = frequency
++            gain.gain.setValueAtTime(0.18, context.currentTime)
++            gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration)
++            oscillator.connect(gain).connect(context.destination)
++            oscillator.start()
++            oscillator.stop(context.currentTime + duration)
++        }
++        catch(e) {}
 +    }
 +
 +    frameAdvance()
 +    {
 +        this.playing = false
++        if(this.countdown) this.stopCountdown()
 +        this.stepOne(true)
 +    }
 +
 +    frameBack()
 +    {
 +        this.playing = false
++        if(this.countdown) this.stopCountdown()
 +        if(this.current > 0) this.seek(this.current - 1)
++    }
++
++    goToStart()
++    {
++        this.playing = false
++        if(this.countdown) this.stopCountdown()
++        this.seek(0)
 +    }
 +
 +    toggleRecord()
@@ -1180,31 +1383,224 @@ index 0000000..c00e781
 +     */
 +    setKeyboard()
 +    {
-+        // Appelé par Tas.js avant que la touche soit bloquée pour le jeu ; renvoie true si la touche est un raccourci
++        // Appelé par Tas.js avant que la touche soit bloquée pour le jeu ; renvoie true si la touche est pour l'éditeur
 +        this.tas.onKeyDown = (event) =>
 +        {
-+            if(event.target && event.target.matches && event.target.matches('input:not([type=range])')) return false
-+            const ctrl = event.ctrlKey || event.metaKey
-+            const code = event.code
++            const target = event.target
++            const typing = target && target.matches && target.matches('input:not([type=range]), textarea')
 +
-+            if(code === 'F1') this.toggleHelp()
-+            else if(code === 'F2') { if(!event.repeat) this.togglePlay() }
-+            else if(code === 'F3') this.frameBack()
-+            else if(code === 'F4') this.frameAdvance()
-+            else if(code === 'F5') { if(!event.repeat) this.toggleRecord() }
-+            else if(code === 'F6') { this.playing = false; this.seek(0) }
-+            else if(code === 'F7') this.changeSpeed(-1)
-+            else if(code === 'F8') this.changeSpeed(1)
-+            else if(ctrl && code === 'KeyZ' && !event.shiftKey) this.undo()
-+            else if(ctrl && (code === 'KeyY' || (code === 'KeyZ' && event.shiftKey))) this.redo()
-+            else if(ctrl && code === 'KeyS') this.saveFile()
-+            else if(ctrl && code === 'KeyO') this.openFile()
-+            else if(code === 'Insert') this.insertFrame()
-+            else if(code === 'Delete') this.deleteFrame()
-+            else return false
++            // Réglages : on attend une touche à affecter
++            if(this.capture) { this.captureKey(event); return true }
++            if(typing) return false
++
++            // Réglages ouverts : Échap ferme
++            if(this.dom.settings.classList.contains('is-visible') && event.code === 'Escape') { this.toggleSettings(); return true }
++
++            const action = this.matchAction(event)
++            if(!action) return false
++            if(event.repeat && NO_REPEAT.has(action)) return true
++            this.runAction(action, event)
 +            return true
 +        }
 +        this.tas.onMouseUpOutside = () => this.paintEnd()
++    }
++
++    matchesKey(binding, event)
++    {
++        if(!binding) return false
++        if(binding.key && binding.key.length === 1) return event.key && event.key.toLowerCase() === binding.key
++        return event.code === binding.code
++    }
++
++    matchAction(event)
++    {
++        const ctrl = event.ctrlKey || event.metaKey, alt = event.altKey, shift = event.shiftKey
++        const candidates = EDITOR_ACTIONS.map(([ name ]) => [ name, this.settings.bindings[name] ]).filter(([ , b ]) => this.matchesKey(b, event))
++        // D'abord la combinaison exacte, sinon une combinaison dont les modificateurs requis sont enfoncés
++        // (permet par exemple d'avancer d'une image en maintenant Maj pour le boost)
++        const exact = candidates.find(([ , b ]) => !!b.ctrl === ctrl && !!b.alt === alt && !!b.shift === shift)
++        if(exact) return exact[0]
++        const loose = candidates.find(([ , b ]) => (!b.ctrl || ctrl) && (!b.alt || alt) && (!b.shift || shift))
++        if(!loose) return null
++        // Ctrl+Maj+Z : rétablir
++        if(loose[0] === 'undo' && shift) return 'redo'
++        return loose[0]
++    }
++
++    runAction(action)
++    {
++        const actions = {
++            help: () => this.toggleHelp(),
++            play: () => this.togglePlay(),
++            back: () => this.frameBack(),
++            next: () => this.frameAdvance(),
++            rec: () => this.toggleRecord(),
++            start: () => this.goToStart(),
++            slower: () => this.changeSpeed(-1),
++            faster: () => this.changeSpeed(1),
++            settings: () => this.toggleSettings(),
++            undo: () => this.undo(),
++            redo: () => this.redo(),
++            save: () => this.saveFile(),
++            open: () => this.openFile(),
++            insert: () => this.insertFrame(),
++            delete: () => this.deleteFrame()
++        }
++        actions[action]?.()
++    }
++
++    /**
++     * Réglages (raccourcis, touches de conduite, compte à rebours) — enregistrés dans le navigateur
++     */
++    defaultSettings()
++    {
++        const bindings = {}
++        for(const [ name, , binding ] of EDITOR_ACTIONS) bindings[name] = { ...binding }
++        const driving = {}
++        for(const [ name ] of DRIVING_ACTIONS) driving[name] = (this.gameKeyMap?.[name] || []).slice(0, 2)
++        return { bindings, driving, countdown: 3, beep: true }
++    }
++
++    loadSettings()
++    {
++        this.gameKeyMap = Object.fromEntries(Object.entries(this.tas.keyMap || {}).map(([ k, v ]) => [ k, v.slice() ]))
++        const defaults = this.defaultSettings()
++        let saved = null
++        try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null') } catch(e) {}
++        this.settings = {
++            ...defaults,
++            ...(saved || {}),
++            bindings: { ...defaults.bindings, ...(saved?.bindings || {}) },
++            driving: { ...defaults.driving, ...(saved?.driving || {}) }
++        }
++        this.applyDriving()
++    }
++
++    saveSettings()
++    {
++        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)) } catch(e) {}
++        this.applyDriving()
++        this.updateTitles()
++    }
++
++    applyDriving()
++    {
++        // Les touches de conduite ne servent qu'à l'enregistrement : la relecture ne dépend que du movie
++        if(!this.tas.keyMap) return
++        for(const [ name ] of DRIVING_ACTIONS)
++            this.tas.keyMap[name] = (this.settings.driving[name] || []).filter(Boolean)
++    }
++
++    keyLabel(code, key)
++    {
++        if(KEY_NAMES[code]) return KEY_NAMES[code]
++        if(key && key.length === 1 && key !== ' ') return key.toUpperCase()
++        const fromLayout = this.layoutMap?.get(code)
++        if(fromLayout) return fromLayout.toUpperCase()
++        if(code.startsWith('Key')) return code.slice(3)
++        if(code.startsWith('Digit')) return code.slice(5)
++        if(code.startsWith('Numpad')) return 'Pavé ' + code.slice(6)
++        return code
++    }
++
++    bindingLabel(binding)
++    {
++        if(!binding) return '—'
++        return (binding.ctrl ? 'Ctrl+' : '') + (binding.alt ? 'Alt+' : '') + (binding.shift ? 'Maj+' : '') + this.keyLabel(binding.code, binding.key)
++    }
++
++    captureKey(event)
++    {
++        const { type, name, slot } = this.capture
++        if([ 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight' ].includes(event.code) && type === 'editor')
++            return // modificateur seul : on attend la touche
++        if(event.code === 'Escape') { this.capture = null; this.renderSettings(); return }
++
++        if(type === 'editor')
++        {
++            const binding = { code: event.code, ctrl: event.ctrlKey || event.metaKey, alt: event.altKey, shift: event.shiftKey }
++            if(event.key && event.key.length === 1 && /\p{L}/u.test(event.key)) binding.key = event.key.toLowerCase()
++            // Conflit avec une autre action : l'autre perd sa touche
++            for(const [ other ] of EDITOR_ACTIONS)
++            {
++                const b = this.settings.bindings[other]
++                if(other !== name && b && this.bindingLabel(b) === this.bindingLabel(binding))
++                {
++                    this.settings.bindings[other] = null
++                    this.flash(`« ${EDITOR_ACTIONS.find(a => a[0] === other)[1]} » n'a plus de raccourci`)
++                }
++            }
++            this.settings.bindings[name] = binding
++        }
++        else
++        {
++            const keys = (this.settings.driving[name] || []).slice()
++            keys[slot] = event.code
++            this.settings.driving[name] = keys
++            if(this.settings.driving[name].length > 2) this.settings.driving[name].length = 2
++            this.keyLabels = { ...(this.keyLabels || {}), [event.code]: event.key }
++        }
++        this.capture = null
++        this.saveSettings()
++        this.renderSettings()
++    }
++
++    toggleSettings()
++    {
++        const visible = this.dom.settings.classList.toggle('is-visible')
++        this.capture = null
++        if(visible)
++        {
++            this.playing = false
++            if(this.countdown) this.stopCountdown()
++            this.renderSettings()
++        }
++    }
++
++    renderSettings()
++    {
++        const editorRows = EDITOR_ACTIONS.map(([ name, label ]) =>
++        {
++            const listening = this.capture && this.capture.type === 'editor' && this.capture.name === name
++            return `<tr><td>${label}</td><td><span class="tas-chip${listening ? ' is-listening' : ''}">${listening ? 'Appuyez sur une touche…' : this.bindingLabel(this.settings.bindings[name])}</span></td>` +
++                `<td><button data-set="editor" data-name="${name}">Modifier</button></td></tr>`
++        }).join('')
++        const drivingRows = DRIVING_ACTIONS.map(([ name, label ]) =>
++        {
++            const keys = this.settings.driving[name] || []
++            const chip = (slot) =>
++            {
++                const listening = this.capture && this.capture.type === 'driving' && this.capture.name === name && this.capture.slot === slot
++                const code = keys[slot]
++                return `<span class="tas-chip${listening ? ' is-listening' : ''}" data-set="driving" data-name="${name}" data-slot="${slot}" title="Cliquer pour changer">${listening ? 'Appuyez…' : code ? this.keyLabel(code, this.keyLabels?.[code]) : '+'}</span>` +
++                    (code && !listening ? `<button class="tas-x" data-clear="${name}" data-slot="${slot}" title="Retirer">×</button>` : '')
++            }
++            return `<tr><td>${label}</td><td colspan="2">${chip(0)} ${chip(1)}</td></tr>`
++        }).join('')
++        this.dom.settingsBody.innerHTML = /* html */`
++            <h2>Réglages</h2>
++            <h3>Raccourcis de l'éditeur</h3>
++            <table>${editorRows}</table>
++            <h3>Touches de conduite (enregistrement)</h3>
++            <table>${drivingRows}</table>
++            <h3>Départ</h3>
++            <label>Compte à rebours avant la lecture (en REC ou depuis l'image 0) :
++                <input class="js-countdown" type="number" min="0" max="10" step="1" value="${this.settings.countdown}"> s (0 = aucun)</label><br>
++            <label><input class="js-beep" type="checkbox"${this.settings.beep ? ' checked' : ''}> Bips sonores</label>
++            <div class="tas-settings-actions">
++                <button data-action="reset">Réinitialiser</button>
++                <button data-action="close">Fermer (Échap)</button>
++            </div>
++            <p class="tas-note">F9 (retour au jeu normal), F11 (plein écran) et F12 (console) ne sont pas modifiables.</p>`
++    }
++
++    updateTitles()
++    {
++        for(const button of this.dom.root.querySelectorAll('[data-action-title]'))
++        {
++            const [ name, text ] = button.dataset.actionTitle.split('|')
++            button.title = `${text} (${this.bindingLabel(this.settings.bindings[name])})`
++        }
 +    }
 +
 +    /**
@@ -1263,6 +1659,21 @@ index 0000000..c00e781
 +            .tas-help-box td { padding: 2px 14px 2px 0; vertical-align: top; }
 +            .tas-help-box td:first-child { color: #ffb84d; white-space: nowrap; }
 +            .tas-footer { padding: 6px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
++            .tas-countdown { position: fixed; inset: 0 340px 0 0; display: none; align-items: center; justify-content: center; z-index: 100001; pointer-events: none;
++                font: 800 160px/1 ui-monospace, Consolas, monospace; color: #fff; text-shadow: 0 0 30px rgba(0,0,0,0.8), 0 0 4px #000; }
++            .tas-countdown.is-visible { display: flex; }
++            .tas-countdown.is-go { color: #32ffc1; }
++            .tas-settings .tas-help-box { max-height: 90vh; overflow: auto; min-width: 520px; }
++            .tas-settings h3 { margin: 14px 0 6px; font-size: 13px; color: #ffb84d; }
++            .tas-settings td:first-child { color: #e6e6f0; }
++            .tas-settings button { font: inherit; color: #e6e6f0; background: #262638; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; padding: 2px 8px; cursor: pointer; }
++            .tas-settings button:hover { background: #33334a; }
++            .tas-chip { display: inline-block; min-width: 34px; text-align: center; padding: 2px 8px; border-radius: 4px; background: #2d2d44; color: #32ffc1; cursor: pointer; }
++            .tas-chip.is-listening { background: #ff4d6d; color: #fff; }
++            .tas-x { margin-left: 2px; padding: 0 5px !important; }
++            .tas-settings input[type=number] { width: 52px; font: inherit; background: #262638; color: #e6e6f0; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; padding: 2px 4px; }
++            .tas-settings-actions { display: flex; gap: 8px; margin-top: 16px; }
++            .tas-note { color: #9a9ab0; font-size: 12px; }
 +        `
 +        document.head.appendChild(style)
 +        // La zone de jeu se réduit à gauche du panneau
@@ -1287,28 +1698,29 @@ index 0000000..c00e781
 +                <div class="tas-finish js-finish"></div>
 +            </div>
 +            <div class="tas-buttons">
-+                <button class="js-start" title="Retour au départ (F6)">⏮</button>
-+                <button class="js-back" title="Image précédente (F3, maintenir pour rembobiner)">◀|</button>
-+                <button class="js-play" title="Lecture / pause (F2)">▶</button>
-+                <button class="js-next" title="Image suivante (F4, maintenir pour avancer)">|▶</button>
-+                <button class="js-rec" title="Enregistrer vos touches (F5)">● REC</button>
-+                <button class="js-slower" title="Plus lent (F7)">−</button>
-+                <button class="js-faster" title="Plus rapide (F8)">+</button>
-+                <button class="js-undo" title="Annuler (Ctrl+Z)">↶</button>
-+                <button class="js-redo" title="Rétablir (Ctrl+Y)">↷</button>
-+                <button class="js-insert" title="Insérer une image neutre ici (Inser)">+img</button>
-+                <button class="js-delete" title="Supprimer l'image courante (Suppr)">−img</button>
++                <button class="js-start" data-action-title="start|Retour au départ">⏮</button>
++                <button class="js-back" data-action-title="back|Image précédente, maintenir pour rembobiner">◀|</button>
++                <button class="js-play" data-action-title="play|Lecture / pause">▶</button>
++                <button class="js-next" data-action-title="next|Image suivante, maintenir pour avancer">|▶</button>
++                <button class="js-rec" data-action-title="rec|Enregistrer vos touches">● REC</button>
++                <button class="js-slower" data-action-title="slower|Plus lent">−</button>
++                <button class="js-faster" data-action-title="faster|Plus rapide">+</button>
++                <button class="js-undo" data-action-title="undo|Annuler">↶</button>
++                <button class="js-redo" data-action-title="redo|Rétablir">↷</button>
++                <button class="js-insert" data-action-title="insert|Insérer une image neutre ici">+img</button>
++                <button class="js-delete" data-action-title="delete|Supprimer l'image courante">−img</button>
 +                <button class="js-truncate" title="Couper le movie après l'image courante">✂ fin</button>
-+                <button class="js-save" title="Enregistrer le movie (Ctrl+S)">💾</button>
-+                <button class="js-open" title="Ouvrir un movie (Ctrl+O)">📂</button>
-+                <button class="js-help" title="Aide (F1)">?</button>
++                <button class="js-save" data-action-title="save|Enregistrer le movie">💾</button>
++                <button class="js-open" data-action-title="open|Ouvrir un movie">📂</button>
++                <button class="js-settings" data-action-title="settings|Réglages : raccourcis, touches, compte à rebours">⚙</button>
++                <button class="js-help" data-action-title="help|Aide">?</button>
 +            </div>
 +            <div class="tas-timeline"><input class="js-timeline" type="range" min="0" max="0" value="0" step="1"></div>
 +            <div class="tas-roll js-roll">
 +                <div class="tas-row is-head"><div>#</div><div>Gaz</div><div>Direction (G ⟷ D)</div><div>Bst</div><div>Frn</div><div>Saut</div></div>
 +                <div class="js-rows"></div>
 +            </div>
-+            <div class="tas-footer">Clic : modifier · glisser : peindre · molette : ±1 image (Maj : ±10) · clic droit sur Direction : 0</div>
++            <div class="tas-footer">Clic : modifier · glisser : peindre · molette : ±1 image (Maj : ±10) · clic droit sur Direction : 0 · ⚙ réglages</div>
 +            <input class="js-file" type="file" accept=".json,application/json" hidden>
 +        `
 +        document.body.appendChild(root)
@@ -1319,30 +1731,23 @@ index 0000000..c00e781
 +
 +        const help = document.createElement('div')
 +        help.className = 'tas-help'
-+        help.innerHTML = /* html */`
-+            <div class="tas-help-box">
-+                <h2>Éditeur TAS — raccourcis</h2>
-+                <table>
-+                    <tr><td>F2</td><td>Lecture / pause (à la vitesse choisie)</td></tr>
-+                    <tr><td>F4</td><td>Image suivante (maintenir = avance image par image)</td></tr>
-+                    <tr><td>F3</td><td>Image précédente (maintenir = rembobiner)</td></tr>
-+                    <tr><td>F5</td><td>Enregistrement ON/OFF : vos touches (flèches/ZQSD, Maj, B, Espace…) sont écrites dans le movie à chaque image jouée</td></tr>
-+                    <tr><td>F6</td><td>Retour au départ (image 0)</td></tr>
-+                    <tr><td>F7 / F8</td><td>Ralentir / accélérer la lecture (×0.05 à ×4)</td></tr>
-+                    <tr><td>Ctrl+Z / Ctrl+Y</td><td>Annuler / rétablir une modification</td></tr>
-+                    <tr><td>Inser / Suppr</td><td>Insérer une image neutre / supprimer l'image courante</td></tr>
-+                    <tr><td>Ctrl+S / Ctrl+O</td><td>Enregistrer / ouvrir un movie (.json)</td></tr>
-+                    <tr><td>F9</td><td>Quitter le mode TAS (retour au jeu normal)</td></tr>
-+                </table>
-+                <p>Méthode classique : en pause, activez REC, maintenez les touches voulues et avancez avec F4. Revenez en arrière avec F3 pour corriger : la suite du movie est conservée, la course est recalculée exactement.</p>
-+                <p>Le movie démarre à la première image chronométrée. Le chrono affiché est celui du jeu, à 60 images/s.</p>
-+            </div>`
++        help.innerHTML = '<div class="tas-help-box js-help-body"></div>'
 +        help.addEventListener('click', () => this.toggleHelp())
 +        document.body.appendChild(help)
 +
++        const settings = document.createElement('div')
++        settings.className = 'tas-help tas-settings'
++        settings.innerHTML = '<div class="tas-help-box js-settings-body"></div>'
++        document.body.appendChild(settings)
++
++        const countdown = document.createElement('div')
++        countdown.className = 'tas-countdown'
++        document.body.appendChild(countdown)
++
 +        const $ = (selector) => root.querySelector(selector)
 +        this.dom = {
-+            root, flash, help,
++            root, flash, help, settings, countdown,
++            helpBody: help.querySelector('.js-help-body'), settingsBody: settings.querySelector('.js-settings-body'),
 +            mode: $('.js-mode'), frame: $('.js-frame'), timer: $('.js-timer'), gates: $('.js-gates'), speed: $('.js-speed'),
 +            length: $('.js-length'), playspeed: $('.js-playspeed'), finish: $('.js-finish'),
 +            play: $('.js-play'), rec: $('.js-rec'), timeline: $('.js-timeline'), roll: $('.js-roll'), rows: $('.js-rows'), file: $('.js-file')
@@ -1353,7 +1758,7 @@ index 0000000..c00e781
 +            root.addEventListener(type, e => e.stopPropagation())
 +
 +        const on = (selector, callback) => $(selector).addEventListener('click', (e) => { callback(); e.currentTarget.blur() })
-+        on('.js-start', () => { this.playing = false; this.seek(0) })
++        on('.js-start', () => this.goToStart())
 +        on('.js-back', () => this.frameBack())
 +        on('.js-play', () => this.togglePlay())
 +        on('.js-next', () => this.frameAdvance())
@@ -1368,6 +1773,28 @@ index 0000000..c00e781
 +        on('.js-save', () => this.saveFile())
 +        on('.js-open', () => this.openFile())
 +        on('.js-help', () => this.toggleHelp())
++        on('.js-settings', () => this.toggleSettings())
++
++        // Fenêtre des réglages
++        settings.addEventListener('click', (event) =>
++        {
++            const element = event.target.closest('[data-set], [data-clear], [data-action]')
++            if(event.target === settings) { this.toggleSettings(); return }
++            if(!element) return
++            if(element.dataset.set) { this.capture = { type: element.dataset.set, name: element.dataset.name, slot: Number(element.dataset.slot || 0) }; this.renderSettings() }
++            else if(element.dataset.clear) { const keys = (this.settings.driving[element.dataset.clear] || []).slice(); keys.splice(Number(element.dataset.slot), 1); this.settings.driving[element.dataset.clear] = keys; this.saveSettings(); this.renderSettings() }
++            else if(element.dataset.action === 'reset') { this.settings = this.defaultSettings(); this.saveSettings(); this.renderSettings(); this.flash('Réglages par défaut rétablis') }
++            else if(element.dataset.action === 'close') this.toggleSettings()
++        })
++        settings.addEventListener('change', (event) =>
++        {
++            if(event.target.matches('.js-countdown')) this.settings.countdown = Math.max(0, Math.min(10, Math.round(Number(event.target.value) || 0)))
++            if(event.target.matches('.js-beep')) this.settings.beep = event.target.checked
++            this.saveSettings()
++        })
++        this.updateTitles()
++        if(navigator.keyboard && navigator.keyboard.getLayoutMap)
++            navigator.keyboard.getLayoutMap().then(map => { this.layoutMap = map; this.updateTitles() }).catch(() => {})
 +
 +        this.dom.file.addEventListener('change', async () =>
 +        {
@@ -1484,6 +1911,18 @@ index 0000000..c00e781
 +
 +    toggleHelp()
 +    {
++        const label = (name) => this.bindingLabel(this.settings.bindings[name])
++        const driving = DRIVING_ACTIONS.map(([ name, text ]) => `${text} : ${(this.settings.driving[name] || []).map(code => this.keyLabel(code, this.keyLabels?.[code])).join(' / ') || '—'}`).join(' · ')
++        this.dom.helpBody.innerHTML = /* html */`
++            <h2>Éditeur TAS — raccourcis</h2>
++            <table>
++                ${EDITOR_ACTIONS.map(([ name, text ]) => `<tr><td>${label(name)}</td><td>${text}</td></tr>`).join('')}
++                <tr><td>F9</td><td>Quitter le mode TAS (retour au jeu normal)</td></tr>
++            </table>
++            <p>Conduite (en REC) : ${driving}</p>
++            <p>Méthode classique : en pause, activez REC, maintenez les touches voulues et avancez image par image. Revenez en arrière pour corriger : la suite du movie est conservée, la course est recalculée exactement.</p>
++            <p>L'image 0 est celle du départ : le chrono vaut 00:00.000 avant elle et avance de 1/60 s par image. En REC ou depuis l'image 0, la lecture commence après un compte à rebours (réglable dans ⚙).</p>
++            <p>Raccourcis, touches et compte à rebours se modifient dans les réglages (⚙, ${label('settings')}).</p>`
 +        this.dom.help.classList.toggle('is-visible')
 +    }
 +
@@ -1501,10 +1940,12 @@ index 0000000..c00e781
 +        const circuit = this.circuit
 +        const d = this.dom
 +
-+        d.mode.textContent = this.recording ? (this.playing ? 'REC ▶' : 'REC') : this.playing ? 'LECTURE' : 'PAUSE'
-+        d.mode.className = 'tas-mode js-mode' + (this.recording ? ' is-rec' : this.playing ? ' is-play' : '')
++        const playing = this.playing || !!this.countdown
++        d.mode.textContent = this.countdown ? (this.recording ? 'REC · départ…' : 'départ…') : this.recording ? (this.playing ? 'REC ▶' : 'REC') : this.playing ? 'LECTURE' : 'PAUSE'
++        d.mode.className = 'tas-mode js-mode' + (this.recording ? ' is-rec' : playing ? ' is-play' : '')
 +        d.frame.textContent = current
-+        d.timer.textContent = formatTime(circuit.timer.elapsedTime)
++        const raceTime = this.finish && current >= this.finish.frame ? this.finish.time : current / this.tas.fps
++        d.timer.textContent = formatTime(raceTime)
 +        d.gates.textContent = `${Math.min(circuit.checkpoints.reachedCount, 9)}/9`
 +        d.speed.textContent = (this.game.physicalVehicle.speed || 0).toFixed(1)
 +        d.length.textContent = this.movie.length
