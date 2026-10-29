@@ -11,7 +11,7 @@ Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https
 | Système | Fichier | Commande |
 |---|---|---|
 | Windows | `BS-Folio-Race-<version>-win-x64.zip` | dézipper, lancer `BS Folio Race.exe` |
-| Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) |
+| Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) | autre variante pour seulement lancer la version tas `./BS-Folio-Race-1.1.0-x86_64.AppImage --appimage-extract-and-run --tas`
 
 Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglages du jeu), `--webgpu` (Linux : tenter WebGPU au lieu de WebGL2).
 
