@@ -3,6 +3,7 @@
 Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https://github.com/brunosimon/folio-2025) (licence MIT), pour Linux et Windows, avec un **éditeur TAS** intégré.
 
 - Le jeu démarre directement à côté du circuit.
+- Deux épreuves : le **Circuit** d'origine (~35 s) et le **Grand tour** de l'île (21 portes, ~2 min 30 à 4 min).
 - **F9** bascule entre le jeu normal et l'éditeur TAS.
 - F11 : plein écran · F12 : outils de développement.
 
@@ -14,6 +15,23 @@ Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https
 | Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) |
 
 Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglages du jeu), `--webgpu` (Linux : tenter WebGPU au lieu de WebGL2).
+
+## Les épreuves
+
+### Circuit
+La course d'origine : 8 portes, 1 tour, sur la route du circuit avec ses barrières. Point de départ : « Start race! ».
+
+### Grand tour
+Un seul grand parcours à travers toute l'île : les 8 portes du circuit, puis **une porte par zone** dans cet ordre :
+
+Labo → Cookie → Projets → Carrière → Social → Coulisses → Autel → Succès → Accueil → Toilettes → Bowling → Machine à remonter le temps → **arrivée sur la ligne de départ**.
+
+- Départ : le point « **Grand tour!** », juste à côté de « Start race! » (6 m plus loin).
+- Le compteur affiche `portes franchies / 21` et le nom de la prochaine porte (dans l'éditeur).
+- Hors route : on roule librement sur toute l'île (la route et les barrières du circuit sont désactivées pendant le Grand tour).
+- L'eau peu profonde ralentit fortement mais ne fait pas perdre (Autel, bras d'eau vers les Toilettes). En eau profonde, la voiture est replacée devant la dernière porte franchie.
+- Le classement en ligne et le succès « circuit rapide » restent réservés au Circuit.
+- Temps de référence : `grand-tour-demo-pilote-auto.json`, un movie produit par un pilote automatique (suivi de trajectoire, sans optimisation) : **2:33.483**. Il est battable, il sert de premier objectif et de preuve que le parcours se boucle.
 
 ## L'éditeur TAS
 
@@ -65,18 +83,22 @@ Quand vous modifiez une image passée, la course est **recalculée exactement** 
 3. Affinez image par image à la souris.
 4. À l'arrivée, le temps final et l'image d'arrivée s'affichent. Enregistrez avec Ctrl+S.
 
-Le movie en cours est aussi sauvegardé automatiquement (et restauré au prochain lancement de l'éditeur).
+Le movie en cours est aussi sauvegardé automatiquement (et restauré au prochain lancement de l'éditeur), **un par épreuve**.
+
+### Choisir l'épreuve
+Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand tour** (l'éditeur se recharge, le movie en cours est sauvegardé). Ouvrir un movie d'une autre épreuve bascule automatiquement sur la bonne. En ligne de commande, l'adresse interne contient `&course=tour`.
 
 ### Format des movies
 
 ```json
 {
-  "format": "bs-folio-tas-movie", "version": 2, "game": "brunosimon/folio-2025", "fps": 60,
+  "format": "bs-folio-tas-movie", "version": 2, "game": "brunosimon/folio-2025", "course": "tour", "fps": 60,
   "result": { "frames": 1652, "time": 27.533, "timings": [ … ] },
   "inputs": [ [ gaz, direction, boost, frein, "suspensions" ], … ]
 }
 ```
 
+- `course` : `"circuit"` ou `"tour"` (absent = circuit, pour les anciens movies).
 - Version 2 : l'entrée 0 est celle de l'image du départ. Les movies en version 1 (éditeur 1.1.0) restent lisibles : une image neutre est ajoutée au début à l'ouverture, pour garder le même timing.
 - `gaz` : -1 à 1.
 - `direction` : -1 à 1 ; **+1 = gauche**, -1 = droite (convention du jeu).
@@ -89,7 +111,7 @@ Le movie en cours est aussi sauvegardé automatiquement (et restauré au prochai
 ./build.sh            # clone folio-2025, applique patches/folio-2025-tas.patch, compile, emballe
 ```
 
-Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates) et `sources/Game/TasEditor.js` (interface), et modifie trois lignes (`index.js`, `Rendering.js`, `Game.js` pour charger Rapier déterministe en mode TAS). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
+Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates), `sources/Game/TasEditor.js` (interface) et `sources/data/grandTour.js` (portes du Grand tour), modifie `World/Areas/CircuitArea.js` (deux épreuves) et trois lignes (`index.js`, `Rendering.js`, `Game.js` pour charger Rapier déterministe en mode TAS). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
 
 Les exécutables (> 100 Mo) se publient dans les **Releases** GitHub, pas dans le dépôt.
 
@@ -102,6 +124,24 @@ cd tools && npm install playwright && npx playwright install chromium
 node determinism.mjs ../../folio-2025/dist     # même movie, deux instances → trajectoires identiques ?
 node savestate-test.mjs ../../folio-2025/dist  # savestates et retours en arrière → identique au run continu ?
 ```
+
+### Recalculer le Grand tour (`tools/grand-tour/`)
+
+Chaîne utilisée pour placer les portes et vérifier que le parcours est faisable :
+
+```bash
+cd tools/grand-tour && npm install playwright
+node map.mjs                           # relevé de l'île par lancers de rayons physiques (0,5 m) → map.json
+python3 gates.py                        # place une porte par zone, sur une zone dégagée → gates.json
+python3 gen_data.py                     # → sources/data/grandTour.js (puis recompiler)
+python3 path.py                         # trajet A* porte à porte → path.json
+node drive.mjs                          # pilote automatique → movie de démonstration
+node verify.mjs <movie.json>            # relecture dans une instance neuve → même temps ?
+```
+
+Les scripts cherchent le jeu compilé dans `../folio-2025/dist` (à côté de ce dossier) ; sinon, indiquez-le avec `FOLIO_DIST=…`.
+
+Attention : modifier les portes rend les movies Grand tour existants invalides. La version livrée est celle de `sources/data/grandTour.js`.
 
 ## Licences
 

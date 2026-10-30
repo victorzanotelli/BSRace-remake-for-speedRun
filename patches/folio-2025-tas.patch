@@ -28,10 +28,10 @@ index f6b9f61..c6a5ff5 100644
              .init()
 diff --git a/sources/Game/Tas.js b/sources/Game/Tas.js
 new file mode 100644
-index 0000000..6adc7b3
+index 0000000..b1cc731
 --- /dev/null
 +++ b/sources/Game/Tas.js
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,726 @@
 +/**
 + * Mode TAS (activé par "#tas" dans l'URL)
 + *
@@ -70,7 +70,8 @@ index 0000000..6adc7b3
 +    event.preventDefault()
 +    const debug = /(^|[#&])debug\b/i.test(location.hash) ? 'debug' : null
 +    const toTas = !tas.active
-+    const hash = [ debug, toTas ? 'tas&skip&editor' : null ].filter(Boolean).join('&')
++    const course = (location.hash.match(/(?:^|[#&])course=(\w+)/) || [])[1]
++    const hash = [ debug, toTas ? 'tas&skip&editor' : null, toTas && course ? `course=${course}` : null ].filter(Boolean).join('&')
 +    location.href = location.pathname + `?mode=${toTas ? 'tas' : 'play'}` + (hash ? '#' + hash : '')
 +}, true)
 +if(/(^|[#&])editor\b/i.test(location.hash)) document.title = 'BS Folio Race — éditeur TAS'
@@ -80,6 +81,7 @@ index 0000000..6adc7b3
 +    window.__TAS__ = tas
 +    window.tas = tas
 +    tas.editorRequested = /(^|[#&])editor\b/i.test(location.hash)
++    tas.course = (location.hash.match(/(?:^|[#&])course=(\w+)/) || [])[1] || 'circuit'
 +
 +    // Hasard reproductible : une source pour le jeu (sauvegardée dans les savestates), une autre pour
 +    // tout ce qui s'exécute hors des images (sons, interface) afin de ne pas perturber celle du jeu
@@ -262,7 +264,8 @@ index 0000000..6adc7b3
 +            w: [ w.x, w.y, w.z ],
 +            timer: c.timer.elapsedTime,
 +            reached: c.checkpoints.reachedCount,
-+            state: c.state
++            state: c.state,
++            course: c.course
 +        }
 +    }
 +
@@ -489,6 +492,7 @@ index 0000000..6adc7b3
 +                flags: [ ...g.objects.list.values() ].map(o => [ o.needsUpdate, o.reseting ])
 +            },
 +            circuit: {
++                course: circuit.course,
 +                state: circuit.state,
 +                timer: captureFields(circuit.timer, 0),
 +                isOut: circuit.bounds.isOut,
@@ -542,6 +546,7 @@ index 0000000..6adc7b3
 +        Object.assign(g.objects.roundedViewPosition, s.objects.rounded)
 +        ;[ ...g.objects.list.values() ].forEach((o, i) => { if(s.objects.flags[i]) [ o.needsUpdate, o.reseting ] = s.objects.flags[i] })
 +
++        if(s.circuit.course && circuit.setCourse) circuit.setCourse(s.circuit.course)
 +        circuit.state = s.circuit.state
 +        restoreFields(circuit.timer, s.circuit.timer)
 +        circuit.bounds.isOut = s.circuit.isOut
@@ -575,6 +580,15 @@ index 0000000..6adc7b3
 +        const originalRender = g.rendering.render.bind(g.rendering)
 +        g.rendering.render = () => { if(tas.render) return originalRender() }
 +        tas.renderOriginal = originalRender
++
++        // Sans affichage, certaines valeurs ne sont jamais calculées alors que des zones s'en servent
++        // (sphères englobantes des particules de l'Autel, de l'Accueil et du Cookie) : on les calcule une fois
++        g.scene.traverse(object =>
++        {
++            const geometry = object.geometry
++            if(geometry && geometry.boundingSphere === null && geometry.attributes && geometry.attributes.position)
++                geometry.computeBoundingSphere()
++        })
 +
 +        // Départ : le compte à rebours du jeu (gsap) reste visible, mais c'est le TAS qui déclenche
 +        // le départ, à une image exacte (3 × 2 s à vitesse ×2 = 3 s = 180 images)
@@ -674,7 +688,7 @@ index 0000000..6adc7b3
 +    /**
 +     * Passe l'intro, lance la course et s'arrête juste avant l'image du départ (image 0 du movie)
 +     */
-+    tas.startRace = () =>
++    tas.startRace = (course = tas.course) =>
 +    {
 +        const g = game()
 +        tas.install()
@@ -685,7 +699,8 @@ index 0000000..6adc7b3
 +        // Course
 +        const circuit = g.world.areas.circuit
 +        tas.pendingStart = null
-+        circuit.restart()
++        tas.course = course
++        circuit.restart(course)
 +        // On s'arrête juste avant l'image du départ : l'image 0 du movie est celle où le chrono démarre
 +        tas.stepUntil(() => tas.pendingStart && tas.frame + 1 >= tas.pendingStart.frame, 60 * 30)
 +        tas.raceStartFrame = tas.frame
@@ -745,10 +760,10 @@ index 0000000..6adc7b3
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..92fcb87
+index 0000000..6430067
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
-@@ -0,0 +1,1262 @@
+@@ -0,0 +1,1299 @@
 +/**
 + * Éditeur TAS intégré au jeu (mode "#tas&editor")
 + *
@@ -767,6 +782,7 @@ index 0000000..92fcb87
 +const SPEEDS = [ 0.05, 0.1, 0.25, 0.5, 1, 2, 4 ]
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
++const COURSES = { circuit: 'Circuit', tour: 'Grand tour' }
 +const SETTINGS_KEY = 'bs-tas-settings'
 +const FINE_INTERVAL = 5
 +const FINE_MAX = 12
@@ -824,6 +840,7 @@ index 0000000..92fcb87
 +        this.tas = tas
 +        this.game = window.game
 +        this.circuit = this.game.world.areas.circuit
++        this.course = COURSES[tas.course] ? tas.course : 'circuit'
 +
 +        this.movie = []
 +        this.greenzone = new Map()
@@ -907,7 +924,7 @@ index 0000000..92fcb87
 +
 +    start()
 +    {
-+        this.silent(() => this.tas.startRace())
++        this.silent(() => this.tas.startRace(this.course))
 +        this.greenzone.set(0, this.tas.saveState())
 +        this.renderNow()
 +    }
@@ -1165,6 +1182,7 @@ index 0000000..92fcb87
 +            format: 'bs-folio-tas-movie',
 +            version: 2, // v2 : l'image 0 est l'image du départ (v1 : l'image suivante)
 +            game: 'brunosimon/folio-2025',
++            course: this.course,
 +            fps: this.tas.fps,
 +            result: this.finish ? { frames: this.finish.frame, time: this.finish.time, timings: this.finish.timings } : null,
 +            inputs: this.movie.map(i => [ i.throttle, i.steer, i.boost ? 1 : 0, i.brake ? 1 : 0, i.susp ? i.susp.map(s => s[0]).join('') : '' ])
@@ -1196,7 +1214,7 @@ index 0000000..92fcb87
 +        this.finish = null
 +        this.playing = false
 +        this.recording = false
-+        this.dirty = false
++        this.dirty = true   // le movie ouvert devient le travail en cours (sauvegardé automatiquement)
 +        this.invalidateAfter(0)
 +        this.seek(0, { force: true })
 +        if(label) this.flash(label)
@@ -1208,7 +1226,7 @@ index 0000000..92fcb87
 +        const link = document.createElement('a')
 +        const time = this.finish ? '-' + formatTime(this.finish.time).replace(/[:.]/g, '') : ''
 +        link.href = URL.createObjectURL(blob)
-+        link.download = `bs-tas${time}.json`
++        link.download = `bs-tas${this.course === 'circuit' ? '' : '-' + this.course}${time}.json`
 +        link.click()
 +        this.tas.real.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
 +        this.flash('Movie enregistré')
@@ -1220,17 +1238,35 @@ index 0000000..92fcb87
 +        this.dom.file.click()
 +    }
 +
-+    autosave()
++    storageKey(course)
 +    {
-+        if(!this.dirty) return
-+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.serialize())); this.dirty = false } catch(e) {}
++        // Le circuit garde la clé d'origine (movies sauvegardés par les versions précédentes)
++        return course === 'circuit' ? STORAGE_KEY : `${STORAGE_KEY}-${course}`
++    }
++
++    // Changer d'épreuve : la page est rechargée pour partir d'une île intacte (reproductibilité)
++    switchCourse(course, movieData = null)
++    {
++        if(!COURSES[course]) return
++        this.autosave(true)
++        if(movieData)
++            try { localStorage.setItem(this.storageKey(course), JSON.stringify(movieData)) } catch(e) {}
++        const hash = location.hash.replace(/&?course=\w+/g, '') + `&course=${course}`
++        location.href = location.pathname + location.search + hash
++        location.reload()
++    }
++
++    autosave(force = false)
++    {
++        if(!this.dirty && !force) return
++        try { localStorage.setItem(this.storageKey(this.course), JSON.stringify(this.serialize())); this.dirty = false } catch(e) {}
 +    }
 +
 +    restoreAutosave()
 +    {
 +        try
 +        {
-+            const raw = localStorage.getItem(STORAGE_KEY)
++            const raw = localStorage.getItem(this.storageKey(this.course))
 +            if(!raw) return
 +            const movie = this.deserialize(JSON.parse(raw))
 +            if(movie.length)
@@ -1627,7 +1663,9 @@ index 0000000..92fcb87
 +            .tas-mode.is-rec { background: var(--rec); color: #fff; }
 +            .tas-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; margin-top: 8px; }
 +            .tas-stats b { color: var(--accent); font-weight: 600; }
-+            .tas-finish { margin-top: 6px; color: var(--green); min-height: 16px; }
++            .tas-finish { margin-top: 2px; color: var(--green); min-height: 16px; }
++            .tas-next { margin-top: 6px; color: var(--muted); min-height: 16px; }
++            .tas-course { font: inherit; font-weight: 700; color: var(--text); background: #262638; border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
 +            .tas-buttons { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 +            .tas button { font: inherit; color: var(--text); background: #262638; border: 1px solid var(--line); border-radius: 4px; padding: 4px 7px; cursor: pointer; }
 +            .tas button:hover { background: #33334a; }
@@ -1690,7 +1728,7 @@ index 0000000..92fcb87
 +        root.className = 'tas'
 +        root.innerHTML = /* html */`
 +            <div class="tas-head">
-+                <div class="tas-title"><span>TAS · Circuit</span><span class="tas-mode js-mode">PAUSE</span></div>
++                <div class="tas-title"><span>TAS · <select class="tas-course js-course" title="Épreuve (la page est rechargée)">${Object.entries(COURSES).map(([ k, v ]) => `<option value="${k}"${k === this.course ? ' selected' : ''}>${v}</option>`).join('')}</select></span><span class="tas-mode js-mode">PAUSE</span></div>
 +                <div class="tas-stats">
 +                    <div>Image <b class="js-frame">0</b></div>
 +                    <div>Chrono <b class="js-timer">00:00.000</b></div>
@@ -1699,6 +1737,7 @@ index 0000000..92fcb87
 +                    <div>Movie <b class="js-length">0</b> img</div>
 +                    <div>Lecture <b class="js-playspeed">×1</b></div>
 +                </div>
++                <div class="tas-next js-next-gate"></div>
 +                <div class="tas-finish js-finish"></div>
 +            </div>
 +            <div class="tas-buttons">
@@ -1753,7 +1792,7 @@ index 0000000..92fcb87
 +            root, flash, help, settings, countdown,
 +            helpBody: help.querySelector('.js-help-body'), settingsBody: settings.querySelector('.js-settings-body'),
 +            mode: $('.js-mode'), frame: $('.js-frame'), timer: $('.js-timer'), gates: $('.js-gates'), speed: $('.js-speed'),
-+            length: $('.js-length'), playspeed: $('.js-playspeed'), finish: $('.js-finish'),
++            length: $('.js-length'), playspeed: $('.js-playspeed'), finish: $('.js-finish'), nextGate: $('.js-next-gate'), course: $('.js-course'),
 +            play: $('.js-play'), rec: $('.js-rec'), timeline: $('.js-timeline'), roll: $('.js-roll'), rows: $('.js-rows'), file: $('.js-file')
 +        }
 +
@@ -1778,6 +1817,7 @@ index 0000000..92fcb87
 +        on('.js-open', () => this.openFile())
 +        on('.js-help', () => this.toggleHelp())
 +        on('.js-settings', () => this.toggleSettings())
++        this.dom.course.addEventListener('change', () => this.switchCourse(this.dom.course.value))
 +
 +        // Fenêtre des réglages
 +        settings.addEventListener('click', (event) =>
@@ -1806,7 +1846,15 @@ index 0000000..92fcb87
 +            if(!file) return
 +            try
 +            {
-+                const movie = this.deserialize(JSON.parse(await file.text()))
++                const data = JSON.parse(await file.text())
++                const movie = this.deserialize(data)
++                const course = data.course || 'circuit'
++                if(course !== this.course)
++                {
++                    this.flash(`Movie du ${COURSES[course] || course} : changement d'épreuve…`)
++                    this.switchCourse(course, data)
++                    return
++                }
 +                this.loadMovie(movie, `Movie chargé : ${file.name} (${movie.length} images)`)
 +            }
 +            catch(error) { this.flash(`Erreur : ${error.message}`) }
@@ -1953,7 +2001,11 @@ index 0000000..92fcb87
 +        d.frame.textContent = current
 +        const raceTime = this.finish && current >= this.finish.frame ? this.finish.time : current / this.tas.fps
 +        d.timer.textContent = formatTime(raceTime)
-+        d.gates.textContent = `${Math.min(circuit.checkpoints.reachedCount, 9)}/9`
++        const totalGates = circuit.checkpoints.count + 2
++        d.gates.textContent = `${Math.min(circuit.checkpoints.reachedCount, totalGates)}/${totalGates}`
++        const target = circuit.checkpoints.target
++        const nextLabel = this.finish && current >= this.finish.frame ? '' : !target ? '' : circuit.checkpoints.reachedCount === totalGates - 1 ? 'Arrivée' : target.label || (circuit.checkpoints.reachedCount === 0 ? 'Ligne de départ' : `Circuit ${target.index}`)
++        if(d.nextGate.textContent !== (nextLabel ? `Prochaine porte : ${nextLabel}` : '')) d.nextGate.textContent = nextLabel ? `Prochaine porte : ${nextLabel}` : ''
 +        d.speed.textContent = (this.game.physicalVehicle.speed || 0).toFixed(1)
 +        d.length.textContent = this.movie.length
 +        d.playspeed.textContent = `×${SPEEDS[this.speedIndex]}`
@@ -2011,6 +2063,278 @@ index 0000000..92fcb87
 +        this.dom.rows.innerHTML = html
 +    }
 +}
+diff --git a/sources/Game/World/Areas/CircuitArea.js b/sources/Game/World/Areas/CircuitArea.js
+index bb760e6..7a531b7 100644
+--- a/sources/Game/World/Areas/CircuitArea.js
++++ b/sources/Game/World/Areas/CircuitArea.js
+@@ -10,6 +10,7 @@ import { alea } from 'seedrandom'
+ import { InputFlag } from '../../InputFlag.js'
+ import { Area } from './Area.js'
+ import { timeToRaceString, timeToReadableString } from '../../utilities/time.js'
++import { grandTourGates, grandTourOutOfBoundsY } from '../../../data/grandTour.js'
+ 
+ export class CircuitArea extends Area
+ {
+@@ -37,6 +38,7 @@ export class CircuitArea extends Area
+         this.setStartPosition()
+         this.setStartingLights()
+         this.setTimer()
++        this.setBounds()
+         this.setCheckpoints()
+         this.setResetObjects()
+         this.setObstacles()
+@@ -45,7 +47,6 @@ export class CircuitArea extends Area
+         this.setInteractivePoint()
+         this.setStartAnimation()
+         this.setRespawn()
+-        this.setBounds()
+         this.setAirDancers()
+         this.setBanners()
+         this.setMenu()
+@@ -317,36 +318,26 @@ export class CircuitArea extends Area
+         this.checkpoints.reachedCount = 0
+         this.checkpoints.timings = []
+ 
+-        // Create checkpoints
++        // Create checkpoints (épreuves : 'circuit' = portes du modèle 3D, 'tour' = circuit puis une porte par zone)
+         const baseCheckpoints = this.references.items.get('checkpoints').sort((a, b) => a.name.localeCompare(b.name))
+ 
+-        let i = 0
+-        for(const baseCheckpoint of baseCheckpoints)
++        const createCheckpoint = (index, position, rotation, scale, respawnPosition, label = null) =>
+         {
+             const checkpoint = {}
+ 
+-            baseCheckpoint.rotation.reorder('YXZ')
+-            baseCheckpoint.visible = false
+-
+-            checkpoint.index = i
+-            checkpoint.position = baseCheckpoint.position.clone()
+-            checkpoint.rotation = baseCheckpoint.rotation.y
+-            checkpoint.scale = baseCheckpoint.scale.x * 0.5
+-            
+-            // Respawn position
+-            checkpoint.respawnPosition = baseCheckpoint.position.clone()
+-            const direction = new THREE.Vector2(3, 0)
+-            direction.rotateAround(new THREE.Vector2(), checkpoint.rotation)
+-            checkpoint.respawnPosition.x += direction.y
+-            checkpoint.respawnPosition.y = 4
+-            checkpoint.respawnPosition.z += direction.x
++            checkpoint.index = index
++            checkpoint.label = label
++            checkpoint.position = position.clone()
++            checkpoint.rotation = rotation
++            checkpoint.scale = scale
++            checkpoint.respawnPosition = respawnPosition
+ 
+             // Center
+             checkpoint.center = new THREE.Vector2(checkpoint.position.x, checkpoint.position.z)
+ 
+             // Segment
+             checkpoint.a = new THREE.Vector2(checkpoint.position.x - checkpoint.scale, checkpoint.position.z)
+-            checkpoint.b = new THREE.Vector2(checkpoint.position.x + checkpoint.scale, baseCheckpoint.position.z)
++            checkpoint.b = new THREE.Vector2(checkpoint.position.x + checkpoint.scale, checkpoint.position.z)
+ 
+             checkpoint.a.rotateAround(checkpoint.center, - checkpoint.rotation)
+             checkpoint.b.rotateAround(checkpoint.center, - checkpoint.rotation)
+@@ -429,14 +420,43 @@ export class CircuitArea extends Area
+                 this.checkpoints.target
+             }
+ 
+-            this.checkpoints.count = this.checkpoints.items.length
++            return checkpoint
++        }
+ 
+-            // Save
+-            this.checkpoints.items.push(checkpoint)
++        // Circuit
++        const circuitItems = []
++        let i = 0
++        for(const baseCheckpoint of baseCheckpoints)
++        {
++            baseCheckpoint.rotation.reorder('YXZ')
++            baseCheckpoint.visible = false
+ 
++            // Respawn position
++            const respawnPosition = baseCheckpoint.position.clone()
++            const direction = new THREE.Vector2(3, 0)
++            direction.rotateAround(new THREE.Vector2(), baseCheckpoint.rotation.y)
++            respawnPosition.x += direction.y
++            respawnPosition.y = 4
++            respawnPosition.z += direction.x
++
++            circuitItems.push(createCheckpoint(i, baseCheckpoint.position, baseCheckpoint.rotation.y, baseCheckpoint.scale.x * 0.5, respawnPosition))
+             i++
+         }
+ 
++        // Grand tour : les portes du circuit, puis une porte par zone de l'île
++        const tourItems = circuitItems.slice()
++        const height = circuitItems[0].position.y
++        for(const gate of grandTourGates)
++        {
++            // Réapparition : 4 m après la porte, dans le sens de la course
++            const respawnPosition = new THREE.Vector3(gate.x - Math.sin(gate.rotation) * 4, 2, gate.z - Math.cos(gate.rotation) * 4)
++            tourItems.push(createCheckpoint(tourItems.length, new THREE.Vector3(gate.x, height, gate.z), gate.rotation, gate.halfWidth, respawnPosition, gate.label))
++        }
++
++        this.courses = { circuit: circuitItems, tour: tourItems }
++        this.course = 'circuit'
++        this.setCourse('circuit')
++
+         // Checkpoint doors
+         const doorIntensity = uniform(2)
+         const doorOutputColor = Fn(([doorColor, doorScale]) =>
+@@ -508,6 +528,15 @@ export class CircuitArea extends Area
+         }
+     }
+ 
++    setCourse(course = 'circuit')
++    {
++        if(!this.courses[course]) course = 'circuit'
++        this.course = course
++        this.checkpoints.items = this.courses[course]
++        this.checkpoints.count = this.checkpoints.items.length - 1
++        this.bounds.threshold = course === 'tour' ? grandTourOutOfBoundsY : 0
++    }
++
+     setResetObjects()
+     {
+         this.resetObjects = {}
+@@ -580,9 +609,9 @@ export class CircuitArea extends Area
+ 
+     setInteractivePoint()
+     {
+-        this.interactivePoint = this.game.interactivePoints.create(
+-            this.references.items.get('interactivePoint')[0].position,
+-            'Start race!',
++        const createPoint = (position, text, course) => this.game.interactivePoints.create(
++            position,
++            text,
+             InteractivePoints.ALIGN_RIGHT,
+             InteractivePoints.STATE_CONCEALED,
+             () =>
+@@ -592,7 +621,7 @@ export class CircuitArea extends Area
+                 if(sound)
+                     sound.play(true)
+ 
+-                this.restart()
++                this.restart(course)
+             },
+             () =>
+             {
+@@ -607,6 +636,18 @@ export class CircuitArea extends Area
+                 this.game.inputs.interactiveButtons.removeItems(['interact'])
+             }
+         )
++
++        const basePosition = this.references.items.get('interactivePoint')[0].position
++        this.raceInteractivePoint = createPoint(basePosition, 'Start race!', 'circuit')
++
++        // Grand tour : second point de départ, 6 m plus loin (hors du rayon d'activation du premier)
++        this.tourInteractivePoint = createPoint(basePosition.clone().add(new THREE.Vector3(0, 0, 6)), 'Grand tour!', 'tour')
++
++        // Les deux points s'affichent et se cachent ensemble
++        this.interactivePoint = {
++            show: () => { this.raceInteractivePoint.show(); this.tourInteractivePoint.show() },
++            hide: () => { this.raceInteractivePoint.hide(); this.tourInteractivePoint.hide() }
++        }
+     }
+ 
+     setStartAnimation()
+@@ -1348,11 +1389,15 @@ export class CircuitArea extends Area
+         this.menu.inputFlag = new InputFlag(this.menu.inputGroup.querySelector('.js-input-flag'))
+     }
+ 
+-    restart()
++    restart(course = this.course)
+     {
+         if(this.state === CircuitArea.STATE_STARTING)
+             return
+ 
++        // Épreuve
++        this.setCourse(course)
++        const isTour = this.course === 'tour'
++
+         // Area frustum
+         this.frustum.alwaysVisible = true
+ 
+@@ -1387,12 +1432,11 @@ export class CircuitArea extends Area
+                 this.startPosition.rotation
+             )
+ 
+-            // Deactivate terrain physics
++            // Circuit : route du circuit (meilleures collisions) à la place du terrain
++            // Grand tour : on garde la physique de la balade (terrain de l'île, pas de route ni de barrières)
+             if(this.game.world.floor)
+-                this.game.world.floor.physical.body.setEnabled(false)
+-            
+-            // Activate road physics (better collision)
+-            this.roadBody.setEnabled(true)
++                this.game.world.floor.physical.body.setEnabled(isTour)
++            this.roadBody.setEnabled(!isTour)
+ 
+             // Starting lights
+             this.startingLights.reset()
+@@ -1439,7 +1483,8 @@ export class CircuitArea extends Area
+             this.timer.show()
+ 
+             // Rails
+-            this.rails.activate()
++            if(isTour) this.rails.deactivate()
++            else this.rails.activate()
+ 
+             // Podium => Hide
+             this.podium.hide()
+@@ -1589,7 +1634,7 @@ export class CircuitArea extends Area
+                 {
+                     this.game.achievements.setProgress('circuitFinish', 1)
+ 
+-                    if(this.timer.elapsedTime < 30)
++                    if(this.timer.elapsedTime < 30 && this.course === 'circuit')
+                         this.game.achievements.setProgress('circuitFinishFast', 1)
+                 }
+ 
+@@ -1602,8 +1647,8 @@ export class CircuitArea extends Area
+                     })
+                 }
+ 
+-                // Circuit en modal (if server connected)
+-                if(this.game.server.connected && !forced)
++                // Circuit en modal (if server connected) — classement en ligne du circuit uniquement
++                if(this.game.server.connected && !forced && this.course === 'circuit')
+                 {
+                     gsap.delayedCall(1, () =>
+                     {
+diff --git a/sources/data/grandTour.js b/sources/data/grandTour.js
+new file mode 100644
+index 0000000..9e1e31a
+--- /dev/null
++++ b/sources/data/grandTour.js
+@@ -0,0 +1,24 @@
++/**
++ * Grand tour : après les 8 portes du circuit, une porte par zone de l'île, puis arrivée sur la ligne de départ.
++ * Positions calculées sur une carte praticable de l'île (sol, eau, obstacles) relevée dans le moteur physique,
++ * avec au moins 4 à 6 m dégagés autour de chaque porte.
++ * rotation : même convention que les portes du circuit (le segment de la porte est perpendiculaire au sens de la course)
++ * halfWidth : demi-largeur de la porte
++ */
++export const grandTourGates = [
++    { name: 'lab', label: 'Labo', x: 14.5, z: 22.5, rotation: -1.0146, halfWidth: 5.2 },
++    { name: 'cookie', label: 'Cookie', x: 3.5, z: 33.5, rotation: -1.2925, halfWidth: 5.4 },
++    { name: 'projects', label: 'Projets', x: 28.5, z: 18.5, rotation: -0.5743, halfWidth: 5.2 },
++    { name: 'career', label: 'Carrière', x: 25.5, z: -0.5, rotation: -0.1083, halfWidth: 6.0 },
++    { name: 'social', label: 'Social', x: 33.5, z: -27.5, rotation: -0.9724, halfWidth: 5.0 },
++    { name: 'behindTheScene', label: 'Coulisses', x: 47.5, z: -15.5, rotation: -1.5586, halfWidth: 5.0 },
++    { name: 'altar', label: 'Autel', x: 66.3, z: -27.9, rotation: -2.3062, halfWidth: 4.0 },
++    { name: 'achievements', label: 'Succès', x: 68.5, z: 3.5, rotation: 2.8516, halfWidth: 5.0 },
++    { name: 'landing', label: 'Accueil', x: 43.5, z: 48.5, rotation: 3.0509, halfWidth: 5.2 },
++    { name: 'toilet', label: 'Toilettes', x: 63.0, z: 64.0, rotation: 2.0152, halfWidth: 4.0 },
++    { name: 'bowling', label: 'Bowling', x: 1.5, z: 68.5, rotation: 0.6576, halfWidth: 5.2 },
++    { name: 'timeMachine', label: 'Machine à remonter le temps', x: -45.5, z: -76.5, rotation: 0.1828, halfWidth: 4.0 },
++]
++
++// Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
++export const grandTourOutOfBoundsY = -1.0
 diff --git a/sources/index.js b/sources/index.js
 index e82f637..6257d22 100644
 --- a/sources/index.js
