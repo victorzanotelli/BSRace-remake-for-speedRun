@@ -2,18 +2,19 @@
 import { launch } from './runner.mjs'
 import fs from 'node:fs'
 const { path, gateIdx, clear, res: RES, half, N } = JSON.parse(fs.readFileSync('path.json'))
-const opts = { look: Number(process.argv[2] || 7), gain: Number(process.argv[3] || 2.2), boostAngle: Number(process.argv[4] || 0.35) }
+const opts = { look: Number(process.argv[2] || 7), gain: Number(process.argv[3] || 2.2), boostAngle: Number(process.argv[4] || 0.35), corners: !process.env.NOCORNERS, trace: process.env.TRACE ? process.env.TRACE.split(',').map(Number) : null }
 const { newGame, close, errors } = await launch({ root: process.env.FOLIO_DIST || new URL('../../../folio-2025/dist', import.meta.url).pathname })
 const page = await newGame('tas&skip&course=tour')
 const res = await page.evaluate(({ path, gateIdx, clear, res, half, N, opts }) =>
 {
     const tas = window.tas, g = window.game, c = g.world.areas.circuit, v = g.physicalVehicle
     tas.startRace('tour')
+    globalThis.__trace = opts.trace
     try {
     const movie = [], events = []
     let seg = 0, stuckFrames = 0, reverse = 0, lastReached = 0
     const total = c.checkpoints.count + 2
-    for(let f = 0; f < 60 * 60 * 6; f++)
+    for(let f = 0; f < (opts.trace ? opts.trace[1] : 60 * 60 * 6); f++)
     {
         const px = v.position.x, pz = v.position.z
         // avance sur le trajet : point le plus proche dans une fenêtre
@@ -47,13 +48,31 @@ const res = await page.evaluate(({ path, gateIdx, clear, res, half, N, opts }) =
         while(diff < -Math.PI) diff += 2 * Math.PI
         const cl = (x, z) => { const ix = Math.floor((x + half) / res), iz = Math.floor((z + half) / res); return ix >= 0 && iz >= 0 && ix < N && iz < N ? clear[iz * N + ix] : 0 }
         const tight = Math.min(cl(tx, tz), cl(px, pz), cl((px + tx) / 2, (pz + tz) / 2))
-        const maxSpeed = tight < 3.2 ? 7 : tight < 4.5 ? 12 : 30
+        let maxSpeed = tight < 3.2 ? 7 : tight < 4.5 ? 12 : 30
+        // virages à venir : on ralentit avant (angle au sommet, distance)
+        if(opts.corners)
+        {
+            let dist = Math.hypot(path[seg + 1][0] - px, path[seg + 1][1] - pz)
+            for(let k = seg + 1; k < Math.min(path.length - 1, seg + 6) && dist < 35; k++)
+            {
+                const [ ax, az ] = path[k - 1], [ bx, bz ] = path[k], [ cx2, cz2 ] = path[k + 1]
+                let turn = Math.atan2(cz2 - bz, cx2 - bx) - Math.atan2(bz - az, bx - ax)
+                while(turn > Math.PI) turn -= 2 * Math.PI
+                while(turn < -Math.PI) turn += 2 * Math.PI
+                const a = Math.abs(turn)
+                if(a > 0.5) maxSpeed = Math.min(maxSpeed, 6 + 14 * (1 - a / Math.PI) + dist * 0.45)
+                dist += Math.hypot(cx2 - bx, cz2 - bz)
+            }
+        }
         let input = { throttle: v.speed > maxSpeed ? 0 : 1, steer: Math.max(-1, Math.min(1, -diff * opts.gain)), boost: Math.abs(diff) < opts.boostAngle && gateDistance > 30 && v.speed < 28 && tight > 6, brake: v.speed > maxSpeed * 1.3, susp: null }
         if(Math.abs(diff) > 0.9 && v.speed > 9) input = { ...input, throttle: 0, brake: true, boost: false }
         // coincé : marche arrière quelques instants
         if(reverse > 0) { input = { throttle: -1, steer: Math.sign(diff) || 1, boost: false, brake: false, susp: null }; reverse-- }
         else if(f > 120 && v.speed < 1.0 && v.position.y > 0.6) { if(++stuckFrames > 90) { reverse = 60; stuckFrames = 0; events.push(`coincé à ${f} (${px.toFixed(0)}, ${pz.toFixed(0)})`) } }
         else stuckFrames = 0
+        if(globalThis.__lastP && Math.hypot(px - __lastP[0], pz - __lastP[1]) > 3) events.push(`téléporté à ${f} : (${__lastP.map(v => v.toFixed(0))}) → (${px.toFixed(0)}, ${pz.toFixed(0)})`)
+        globalThis.__lastP = [ px, pz ]
+        if(globalThis.__trace && f % (__trace[2] || 60) === 0 && f > __trace[0] && f < __trace[1]) events.push(`  ${f} (${px.toFixed(1)}, ${v.position.y.toFixed(1)}, ${pz.toFixed(1)}) seg ${seg} v ${v.speed.toFixed(1)}`)
         movie.push(input)
         tas.input = input
         tas.step()
@@ -71,6 +90,6 @@ const res = await page.evaluate(({ path, gateIdx, clear, res, half, N, opts }) =
 if(res.error) { console.log(res.error); process.exit(0) }
 console.log(res.events.join('\n'))
 console.log(`→ ${res.finished ? 'ARRIVÉE' : 'non terminé'} : portes ${res.reached}/${res.total}, ${res.frames} images, chrono ${res.time.toFixed(2)} s`)
-if(res.finished) fs.writeFileSync('autopilot-tour.json', JSON.stringify(res.movie))
+if(res.finished) fs.writeFileSync(process.env.OUT || 'autopilot-tour.json', JSON.stringify(res.movie))
 if(errors.length) console.log('Erreurs :', [ ...new Set(errors) ].slice(0, 3))
 await close()

@@ -28,10 +28,10 @@ index f6b9f61..c6a5ff5 100644
              .init()
 diff --git a/sources/Game/Tas.js b/sources/Game/Tas.js
 new file mode 100644
-index 0000000..b1cc731
+index 0000000..014c051
 --- /dev/null
 +++ b/sources/Game/Tas.js
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,752 @@
 +/**
 + * Mode TAS (activé par "#tas" dans l'URL)
 + *
@@ -47,6 +47,7 @@ index 0000000..b1cc731
 +import seedrandom from 'seedrandom'
 +import { TasEditor } from './TasEditor.js'
 +import { timeToRaceString } from './utilities/time.js'
++import { circleIntersectsPolygon } from './utilities/maths.js'
 +
 +const FPS = 60
 +const BASE_DATE = Date.UTC(2026, 0, 15, 12, 0, 0) // date fixe (saison/jour constants)
@@ -590,6 +591,31 @@ index 0000000..b1cc731
 +                geometry.computeBoundingSphere()
 +        })
 +
++        // Grand tour : les zones de l'île ne mettent à jour leur logique (quilles, cabane, objets…) que lorsqu'elles
++        // sont dans le champ de la caméra, qui dépend de la taille de la fenêtre. Pour que la course soit la même
++        // quelle que soit la fenêtre, leur logique tourne en permanence ; seul l'affichage suit encore la caméra.
++        if(tas.course === 'tour')
++        {
++            for(const area of Object.values(g.world.areas))
++            {
++                if(!area?.frustum?.test)
++                    continue
++                const frustum = area.frustum
++                frustum.test = () =>
++                {
++                    if(frustum.isIn !== true)
++                    {
++                        frustum.isIn = true
++                        area.events.trigger('frustumIn')
++                    }
++                    const quad = g.view.optimalArea.quad2
++                    const visible = frustum.alwaysVisible || circleIntersectsPolygon(frustum.position, frustum.radius, [ quad[0].offseted, quad[1].offseted, quad[2].offseted, quad[3].offseted ])
++                    for(const object3D of area.objects.hideable)
++                        object3D.visible = visible
++                }
++            }
++        }
++
 +        // Départ : le compte à rebours du jeu (gsap) reste visible, mais c'est le TAS qui déclenche
 +        // le départ, à une image exacte (3 × 2 s à vitesse ×2 = 3 s = 180 images)
 +        const circuit = g.world.areas.circuit
@@ -760,10 +786,10 @@ index 0000000..b1cc731
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..6430067
+index 0000000..5c9ab04
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
-@@ -0,0 +1,1299 @@
+@@ -0,0 +1,1307 @@
 +/**
 + * Éditeur TAS intégré au jeu (mode "#tas&editor")
 + *
@@ -783,6 +809,8 @@ index 0000000..6430067
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
 +const COURSES = { circuit: 'Circuit', tour: 'Grand tour' }
++// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A avec barrières depuis 1.4.0)
++const TRACKS = { tour: 2 }
 +const SETTINGS_KEY = 'bs-tas-settings'
 +const FINE_INTERVAL = 5
 +const FINE_MAX = 12
@@ -1183,6 +1211,7 @@ index 0000000..6430067
 +            version: 2, // v2 : l'image 0 est l'image du départ (v1 : l'image suivante)
 +            game: 'brunosimon/folio-2025',
 +            course: this.course,
++            ...(TRACKS[this.course] ? { track: TRACKS[this.course] } : {}),
 +            fps: this.tas.fps,
 +            result: this.finish ? { frames: this.finish.frame, time: this.finish.time, timings: this.finish.timings } : null,
 +            inputs: this.movie.map(i => [ i.throttle, i.steer, i.boost ? 1 : 0, i.brake ? 1 : 0, i.susp ? i.susp.map(s => s[0]).join('') : '' ])
@@ -1241,7 +1270,9 @@ index 0000000..6430067
 +    storageKey(course)
 +    {
 +        // Le circuit garde la clé d'origine (movies sauvegardés par les versions précédentes)
-+        return course === 'circuit' ? STORAGE_KEY : `${STORAGE_KEY}-${course}`
++        // Grand tour : une clé par version du tracé (un movie de l'ancien tracé ne se rejoue pas sur le nouveau)
++        if(course === 'circuit') return STORAGE_KEY
++        return TRACKS[course] > 1 ? `${STORAGE_KEY}-${course}-v${TRACKS[course]}` : `${STORAGE_KEY}-${course}`
 +    }
 +
 +    // Changer d'épreuve : la page est rechargée pour partir d'une île intacte (reproductibilité)
@@ -1855,7 +1886,10 @@ index 0000000..6430067
 +                    this.switchCourse(course, data)
 +                    return
 +                }
-+                this.loadMovie(movie, `Movie chargé : ${file.name} (${movie.length} images)`)
++                const oldTrack = TRACKS[course] && (data.track || 1) !== TRACKS[course]
++                this.loadMovie(movie, oldTrack
++                    ? `Attention : movie de l'ancien tracé du ${COURSES[course]} (version 1.3.0), il ne suivra pas le nouveau parcours`
++                    : `Movie chargé : ${file.name} (${movie.length} images)`)
 +            }
 +            catch(error) { this.flash(`Erreur : ${error.message}`) }
 +        })
@@ -2063,15 +2097,33 @@ index 0000000..6430067
 +        this.dom.rows.innerHTML = html
 +    }
 +}
+diff --git a/sources/Game/World/Areas/AltarArea.js b/sources/Game/World/Areas/AltarArea.js
+index 3bbb2bb..e38c47f 100644
+--- a/sources/Game/World/Areas/AltarArea.js
++++ b/sources/Game/World/Areas/AltarArea.js
+@@ -403,7 +403,12 @@ export class AltarArea extends Area
+                 this.animateBeamParticles()
+                 this.data.insert()
+                 this.updateText(this.value + 1)
+-                this.game.player.die()
++                // Pendant une course : retour à la dernière porte franchie (comme une sortie de piste)
++                const circuit = this.game.world.areas?.circuit
++                if(circuit && circuit.state === circuit.constructor.STATE_RUNNING)
++                    circuit.respawn()
++                else
++                    this.game.player.die()
+                 this.sounds.deathBell2.play()
+                 gsap.delayedCall(2.2, () =>
+                 {
 diff --git a/sources/Game/World/Areas/CircuitArea.js b/sources/Game/World/Areas/CircuitArea.js
-index bb760e6..7a531b7 100644
+index bb760e6..11dbea9 100644
 --- a/sources/Game/World/Areas/CircuitArea.js
 +++ b/sources/Game/World/Areas/CircuitArea.js
 @@ -10,6 +10,7 @@ import { alea } from 'seedrandom'
  import { InputFlag } from '../../InputFlag.js'
  import { Area } from './Area.js'
  import { timeToRaceString, timeToReadableString } from '../../utilities/time.js'
-+import { grandTourGates, grandTourOutOfBoundsY } from '../../../data/grandTour.js'
++import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY } from '../../../data/grandTour.js'
  
  export class CircuitArea extends Area
  {
@@ -2167,7 +2219,7 @@ index bb760e6..7a531b7 100644
              i++
          }
  
-+        // Grand tour : les portes du circuit, puis une porte par zone de l'île
++        // Grand tour : un tour du circuit (portes 0 à 7), puis une porte par zone de l'île, arrivée sur la porte 0
 +        const tourItems = circuitItems.slice()
 +        const height = circuitItems[0].position.y
 +        for(const gate of grandTourGates)
@@ -2184,7 +2236,7 @@ index bb760e6..7a531b7 100644
          // Checkpoint doors
          const doorIntensity = uniform(2)
          const doorOutputColor = Fn(([doorColor, doorScale]) =>
-@@ -508,6 +528,15 @@ export class CircuitArea extends Area
+@@ -508,6 +528,16 @@ export class CircuitArea extends Area
          }
      }
  
@@ -2195,12 +2247,186 @@ index bb760e6..7a531b7 100644
 +        this.checkpoints.items = this.courses[course]
 +        this.checkpoints.count = this.checkpoints.items.length - 1
 +        this.bounds.threshold = course === 'tour' ? grandTourOutOfBoundsY : 0
++        if(this.rails) this.rails.setCourse(course)
 +    }
 +
      setResetObjects()
      {
          this.resetObjects = {}
-@@ -580,9 +609,9 @@ export class CircuitArea extends Area
+@@ -564,9 +594,171 @@ export class CircuitArea extends Area
+         railsMesh.material.side = THREE.DoubleSide
+ 
+         this.rails.object = railsMesh.userData.object
+-        
++        this.rails.mesh = railsMesh
++        this.rails.collider = this.rails.object.physical.colliders[0]
++
++        // Grand tour : barrières avec deux ouvertures (sortie vers l'île après la porte 7, retour avant la ligne)
++        // Les triangles proches d'une ouverture sont redécoupés (côté le plus long coupé en deux, jusqu'à 25 cm),
++        // puis ceux dont le centre tombe dans l'ouverture sont retirés.
++        const inGap = (x, z) => grandTourRailGaps.some((gap) => Math.hypot(x - gap.x, z - gap.z) < gap.radius)
++        const nearGap = (points) =>
++        {
++            for(const gap of grandTourRailGaps)
++            {
++                // distance du centre de l'ouverture au triangle (en projection au sol), approchée par les côtés et le centre
++                let min = Infinity
++                for(let i = 0; i < 3; i++)
++                {
++                    const [ ax, az ] = points[i], [ bx, bz ] = points[(i + 1) % 3]
++                    const dx = bx - ax, dz = bz - az, length = dx * dx + dz * dz
++                    const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((gap.x - ax) * dx + (gap.z - az) * dz) / length))
++                    min = Math.min(min, Math.hypot(ax + t * dx - gap.x, az + t * dz - gap.z))
++                }
++                if(min < gap.radius + 0.1)
++                    return true
++            }
++            return false
++        }
++        // vertices : tableaux de valeurs interpolables ; toXZ(vertex) : position au sol dans le monde
++        const cutGaps = (vertices, index, toXZ) =>
++        {
++            vertices = vertices.slice()
++            const out = []
++            const middles = new Map()
++            const middle = (i, j) =>
++            {
++                const key = i < j ? i + ',' + j : j + ',' + i
++                if(!middles.has(key))
++                {
++                    const a = vertices[i], b = vertices[j]
++                    vertices.push(a.map((value, k) => (value + b[k]) / 2))
++                    middles.set(key, vertices.length - 1)
++                }
++                return middles.get(key)
++            }
++            const process = (a, b, c, depth) =>
++            {
++                const points = [ toXZ(vertices[a]), toXZ(vertices[b]), toXZ(vertices[c]) ]
++                if(!nearGap(points))
++                {
++                    out.push(a, b, c)
++                    return
++                }
++                const edges = [ [ a, b, c ], [ b, c, a ], [ c, a, b ] ].map(([ i, j, k ]) =>
++                {
++                    const p = toXZ(vertices[i]), q = toXZ(vertices[j])
++                    const dy = vertices[i][1] - vertices[j][1]
++                    return { i, j, k, length: Math.hypot(p[0] - q[0], p[1] - q[1], dy) }
++                })
++                edges.sort((e1, e2) => e2.length - e1.length)
++                const longest = edges[0]
++                if(longest.length < 0.25 || depth > 40)
++                {
++                    const cx = (points[0][0] + points[1][0] + points[2][0]) / 3, cz = (points[0][1] + points[1][1] + points[2][1]) / 3
++                    if(!inGap(cx, cz))
++                        out.push(a, b, c)
++                    return
++                }
++                const m = middle(longest.i, longest.j)
++                // on garde l'orientation du triangle d'origine (i → j → k)
++                process(longest.i, m, longest.k, depth + 1)
++                process(m, longest.j, longest.k, depth + 1)
++            }
++            for(let t = 0; t < index.length; t += 3)
++                process(index[t], index[t + 1], index[t + 2], 0)
++            return { vertices, index: out }
++        }
++
++        // Affichage : nouvelle géométrie (mêmes attributs) avec les ouvertures
++        railsMesh.updateWorldMatrix(true, false)
++        this.rails.geometries = { circuit: railsMesh.geometry }
++        {
++            const geometry = railsMesh.geometry
++            const names = Object.keys(geometry.attributes)
++            const sizes = names.map((name) => geometry.attributes[name].itemSize)
++            const count = geometry.attributes.position.count
++            const vertices = []
++            for(let i = 0; i < count; i++)
++            {
++                const vertex = []
++                names.forEach((name, n) => { for(let k = 0; k < sizes[n]; k++) vertex.push(geometry.attributes[name].array[i * sizes[n] + k]) })
++                vertices.push(vertex)
++            }
++            const positionOffset = names.slice(0, names.indexOf('position')).reduce((sum, name) => sum + geometry.attributes[name].itemSize, 0)
++            const world = new THREE.Vector3()
++            const toXZ = (vertex) =>
++            {
++                world.set(vertex[positionOffset], vertex[positionOffset + 1], vertex[positionOffset + 2]).applyMatrix4(railsMesh.matrixWorld)
++                return [ world.x, world.z ]
++            }
++            const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: count }, (_, i) => i)
++            const cut = cutGaps(vertices, index, toXZ)
++            const tourGeometry = new THREE.BufferGeometry()
++            let offset = 0
++            names.forEach((name, n) =>
++            {
++                const source = geometry.attributes[name]
++                const array = new source.array.constructor(cut.vertices.length * sizes[n])
++                cut.vertices.forEach((vertex, v) => { for(let k = 0; k < sizes[n]; k++) array[v * sizes[n] + k] = vertex[offset + k] })
++                tourGeometry.setAttribute(name, new THREE.BufferAttribute(array, sizes[n], source.normalized))
++                offset += sizes[n]
++            })
++            tourGeometry.setIndex(cut.index)
++            tourGeometry.computeBoundingSphere()
++            this.rails.geometries.tour = tourGeometry
++        }
++
++        // Physique : collider créé au premier départ du Grand tour seulement (le Circuit garde exactement le même monde physique)
++        this.rails.tourCollider = null
++        this.rails.ensureTourCollider = () =>
++        {
++            if(this.rails.tourCollider)
++                return
++            const original = this.rails.collider
++            const body = this.rails.object.physical.body
++            const flat = original.vertices()
++            const translation = original.translation()
++            const bodyPosition = body.translation()
++            const offset = { x: translation.x - bodyPosition.x, y: translation.y - bodyPosition.y, z: translation.z - bodyPosition.z }
++            const vertices = []
++            for(let i = 0; i < flat.length; i += 3)
++                vertices.push([ flat[i], flat[i + 1], flat[i + 2] ])
++            const cut = cutGaps(vertices, Array.from(original.indices()), (vertex) => [ vertex[0] + translation.x, vertex[2] + translation.z ])
++            const RAPIER = this.game.RAPIER
++            const description = RAPIER.ColliderDesc.trimesh(new Float32Array(cut.vertices.flat()), new Uint32Array(cut.index))
++                .setTranslation(offset.x, offset.y, offset.z)
++                .setDensity(0.1)
++                .setFriction(original.friction())
++                .setFrictionCombineRule(original.frictionCombineRule())
++                .setRestitution(original.restitution())
++                .setCollisionGroups(original.collisionGroups())
++            this.rails.tourCollider = this.game.physics.world.createCollider(description, body)
++            this.rails.tourCollider.setEnabled(this.course === 'tour')
++        }
++
++        this.rails.setCourse = (course) =>
++        {
++            const isTour = course === 'tour'
++            railsMesh.geometry = this.rails.geometries[isTour ? 'tour' : 'circuit']
++            // Barrières en place (pendant une course, par exemple au rechargement d'un savestate) : on ne touche aux colliders
++            // que si ça change, car un setEnabled inutile modifie l'état du moteur physique (et la suite de la course).
++            // Barrières retirées : isEnabled() renvoie toujours false (désactivé par le corps), on règle donc les deux.
++            const bodyEnabled = this.rails.object.physical.body.isEnabled()
++            const set = (collider, enabled) =>
++            {
++                if(!bodyEnabled || collider.isEnabled() !== enabled)
++                    collider.setEnabled(enabled)
++            }
++            set(this.rails.collider, !isTour)
++            if(this.rails.tourCollider)
++                set(this.rails.tourCollider, isTour)
++        }
++
+         this.rails.activate = () =>
+         {
++            if(this.course === 'tour')
++                this.rails.ensureTourCollider()
++            this.rails.setCourse(this.course)
+             this.game.objects.enable(this.rails.object)
+         }
+         
+@@ -580,9 +772,9 @@ export class CircuitArea extends Area
  
      setInteractivePoint()
      {
@@ -2213,7 +2439,7 @@ index bb760e6..7a531b7 100644
              InteractivePoints.ALIGN_RIGHT,
              InteractivePoints.STATE_CONCEALED,
              () =>
-@@ -592,7 +621,7 @@ export class CircuitArea extends Area
+@@ -592,7 +784,7 @@ export class CircuitArea extends Area
                  if(sound)
                      sound.play(true)
  
@@ -2222,7 +2448,7 @@ index bb760e6..7a531b7 100644
              },
              () =>
              {
-@@ -607,6 +636,18 @@ export class CircuitArea extends Area
+@@ -607,6 +799,18 @@ export class CircuitArea extends Area
                  this.game.inputs.interactiveButtons.removeItems(['interact'])
              }
          )
@@ -2241,7 +2467,7 @@ index bb760e6..7a531b7 100644
      }
  
      setStartAnimation()
-@@ -1348,11 +1389,15 @@ export class CircuitArea extends Area
+@@ -1348,11 +1552,15 @@ export class CircuitArea extends Area
          this.menu.inputFlag = new InputFlag(this.menu.inputGroup.querySelector('.js-input-flag'))
      }
  
@@ -2258,34 +2484,66 @@ index bb760e6..7a531b7 100644
          // Area frustum
          this.frustum.alwaysVisible = true
  
-@@ -1387,12 +1432,11 @@ export class CircuitArea extends Area
+@@ -1387,13 +1595,19 @@ export class CircuitArea extends Area
                  this.startPosition.rotation
              )
  
 -            // Deactivate terrain physics
 +            // Circuit : route du circuit (meilleures collisions) à la place du terrain
-+            // Grand tour : on garde la physique de la balade (terrain de l'île, pas de route ni de barrières)
++            // Grand tour : route du circuit et terrain de l'île (la route est au niveau du sol, elle couvre les passages sur l'eau)
              if(this.game.world.floor)
 -                this.game.world.floor.physical.body.setEnabled(false)
 -            
 -            // Activate road physics (better collision)
--            this.roadBody.setEnabled(true)
 +                this.game.world.floor.physical.body.setEnabled(isTour)
-+            this.roadBody.setEnabled(!isTour)
+             this.roadBody.setEnabled(true)
  
++            // Grand tour : pas d'étiquettes des zones pendant la course (moins de choses à afficher)
++            if(isTour && !this.game.interactivePoints.temporaryHidden)
++            {
++                this.game.interactivePoints.temporaryHide()
++                this.hidInteractivePoints = true
++            }
++
              // Starting lights
              this.startingLights.reset()
-@@ -1439,7 +1483,8 @@ export class CircuitArea extends Area
+ 
+@@ -1412,7 +1626,10 @@ export class CircuitArea extends Area
+             this.resetObjects.reset()
+ 
+             // Crates (all crates in the world?)
+-            this.game.world.explosiveCrates.reset()
++            // Grand tour : on retire les caisses explosives à moins de 10 m d'une porte
++            if(isTour && !this.tourExcludedCrates)
++                this.tourExcludedCrates = new Set(this.game.world.explosiveCrates.items.filter((crate) => this.courses.tour.some((checkpoint) => Math.hypot(crate.reference.position.x - checkpoint.position.x, crate.reference.position.z - checkpoint.position.z) < 10)))
++            this.game.world.explosiveCrates.reset(isTour ? this.tourExcludedCrates : null)
+ 
+             // Weather
+             this.game.weather.override.start(
+@@ -1438,7 +1655,7 @@ export class CircuitArea extends Area
+             // Timer
              this.timer.show()
  
-             // Rails
--            this.rails.activate()
-+            if(isTour) this.rails.deactivate()
-+            else this.rails.activate()
+-            // Rails
++            // Rails (Grand tour : avec les deux ouvertures)
+             this.rails.activate()
  
              // Podium => Hide
-             this.podium.hide()
-@@ -1589,7 +1634,7 @@ export class CircuitArea extends Area
+@@ -1545,6 +1762,13 @@ export class CircuitArea extends Area
+                 // Menu buttons
+                 this.menu.racingButtons.classList.remove('is-active')
+ 
++                // Étiquettes des zones (masquées pendant le Grand tour)
++                if(this.hidInteractivePoints)
++                {
++                    this.hidInteractivePoints = false
++                    this.game.interactivePoints.recover()
++                }
++
+                 // Interactive point
+                 this.interactivePoint.show()
+ 
+@@ -1589,7 +1813,7 @@ export class CircuitArea extends Area
                  {
                      this.game.achievements.setProgress('circuitFinish', 1)
  
@@ -2294,7 +2552,7 @@ index bb760e6..7a531b7 100644
                          this.game.achievements.setProgress('circuitFinishFast', 1)
                  }
  
-@@ -1602,8 +1647,8 @@ export class CircuitArea extends Area
+@@ -1602,8 +1826,8 @@ export class CircuitArea extends Area
                      })
                  }
  
@@ -2305,32 +2563,73 @@ index bb760e6..7a531b7 100644
                  {
                      gsap.delayedCall(1, () =>
                      {
+diff --git a/sources/Game/World/ExplosiveCrates.js b/sources/Game/World/ExplosiveCrates.js
+index d6fd7e3..dda66cf 100644
+--- a/sources/Game/World/ExplosiveCrates.js
++++ b/sources/Game/World/ExplosiveCrates.js
+@@ -147,13 +147,29 @@ export class ExplosiveCrates
+         })
+     }
+ 
+-    reset()
++    reset(excluded = null)
+     {
+         for(const crate of this.items)
+         {
+             this.game.objects.resetObject(crate.object)
+             crate.exploded = false
+ 
++            // Caisses retirées (Grand tour : celles qui sont collées à une porte)
++            if(excluded && excluded.has(crate))
++            {
++                crate.exploded = true
++                const hide = () =>
++                {
++                    this.game.objects.disable(crate.object)
++                    crate.object.visual.object3D.position.y = crate.object.physical.initialState.position.y + 100
++                    crate.object.visual.object3D.needsUpdate = true
++                }
++                hide()
++                // resetObject réactive le corps à l'image suivante : on le retire à nouveau juste après
++                this.game.ticker.wait(2, hide)
++                continue
++            }
++
+             this.game.ticker.wait(2, () =>
+             {
+                 crate.object.physical.body.setEnabled(true)
 diff --git a/sources/data/grandTour.js b/sources/data/grandTour.js
 new file mode 100644
-index 0000000..9e1e31a
+index 0000000..68e1d5d
 --- /dev/null
 +++ b/sources/data/grandTour.js
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,30 @@
 +/**
-+ * Grand tour : après les 8 portes du circuit, une porte par zone de l'île, puis arrivée sur la ligne de départ.
-+ * Positions calculées sur une carte praticable de l'île (sol, eau, obstacles) relevée dans le moteur physique,
-+ * avec au moins 4 à 6 m dégagés autour de chaque porte.
++ * Grand tour (tracé A) : un tour complet du circuit avec ses barrières (portes 0 à 7),
++ * sortie par une ouverture juste après la porte 7, une porte par zone de l'île,
++ * retour sur le circuit par une seconde ouverture, arrivée sur la ligne de départ (porte 0).
++ * Positions calculées sur une carte praticable de l'île (sol, eau, obstacles) relevée dans le moteur physique.
 + * rotation : même convention que les portes du circuit (le segment de la porte est perpendiculaire au sens de la course)
 + * halfWidth : demi-largeur de la porte
 + */
 +export const grandTourGates = [
-+    { name: 'lab', label: 'Labo', x: 14.5, z: 22.5, rotation: -1.0146, halfWidth: 5.2 },
-+    { name: 'cookie', label: 'Cookie', x: 3.5, z: 33.5, rotation: -1.2925, halfWidth: 5.4 },
-+    { name: 'projects', label: 'Projets', x: 28.5, z: 18.5, rotation: -0.5743, halfWidth: 5.2 },
-+    { name: 'career', label: 'Carrière', x: 25.5, z: -0.5, rotation: -0.1083, halfWidth: 6.0 },
-+    { name: 'social', label: 'Social', x: 33.5, z: -27.5, rotation: -0.9724, halfWidth: 5.0 },
-+    { name: 'behindTheScene', label: 'Coulisses', x: 47.5, z: -15.5, rotation: -1.5586, halfWidth: 5.0 },
-+    { name: 'altar', label: 'Autel', x: 66.3, z: -27.9, rotation: -2.3062, halfWidth: 4.0 },
-+    { name: 'achievements', label: 'Succès', x: 68.5, z: 3.5, rotation: 2.8516, halfWidth: 5.0 },
-+    { name: 'landing', label: 'Accueil', x: 43.5, z: 48.5, rotation: 3.0509, halfWidth: 5.2 },
-+    { name: 'toilet', label: 'Toilettes', x: 63.0, z: 64.0, rotation: 2.0152, halfWidth: 4.0 },
-+    { name: 'bowling', label: 'Bowling', x: 1.5, z: 68.5, rotation: 0.6576, halfWidth: 5.2 },
-+    { name: 'timeMachine', label: 'Machine à remonter le temps', x: -45.5, z: -76.5, rotation: 0.1828, halfWidth: 4.0 },
++    { name: 'bowling', label: 'Bowling', x: 1.5, z: 68.5, rotation: -2.0525, halfWidth: 5.2 },
++    { name: 'landing', label: 'Accueil', x: 43.5, z: 48.5, rotation: -1.3654, halfWidth: 5.2 },
++    { name: 'toilet', label: 'Toilettes', x: 62.0, z: 61.5, rotation: -1.9333, halfWidth: 4.0 },
++    { name: 'achievements', label: 'Succès', x: 69.5, z: 19.5, rotation: -0.0435, halfWidth: 5.0 },
++    { name: 'altar', label: 'Autel', x: 66.3, z: -27.9, rotation: -3.1416, halfWidth: 4.0 },
++    { name: 'behindTheScene', label: 'Coulisses', x: 47.5, z: -15.5, rotation: 1.9513, halfWidth: 5.0 },
++    { name: 'social', label: 'Social', x: 33.5, z: -27.5, rotation: 2.6079, halfWidth: 5.0 },
++    { name: 'career', label: 'Carrière', x: 25.5, z: -0.5, rotation: 2.8243, halfWidth: 6.0 },
++    { name: 'projects', label: 'Projets', x: 28.5, z: 18.5, rotation: 1.9040, halfWidth: 5.2 },
++    { name: 'lab', label: 'Labo', x: 14.5, z: 22.5, rotation: 1.7993, halfWidth: 5.2 },
++    { name: 'cookie', label: 'Cookie', x: 3.5, z: 33.5, rotation: 2.0344, halfWidth: 5.4 },
++]
++
++// Ouvertures dans les barrières du circuit (les triangles des barrières à moins de radius mètres sont retirés)
++export const grandTourRailGaps = [
++    { name: 'exit', x: -25.0, z: 66.5, radius: 6.0 },
++    { name: 'entry', x: -4.6, z: 35.5, radius: 6.0 },
 +]
 +
 +// Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
