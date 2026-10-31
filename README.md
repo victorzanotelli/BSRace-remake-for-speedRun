@@ -29,6 +29,8 @@ Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglag
 
 ## Les épreuves
 
+**Temps partiels** (depuis 1.4.3) : pendant la course, en bas à gauche, la liste des portes franchies avec le temps au passage et l'écart depuis la porte précédente (les 10 dernières portes ; l'arrivée en vert). La liste reste affichée jusqu'à la fin de la course et suit les retours en arrière dans l'éditeur TAS. Le temps de l'arrivée est exactement celui du chrono.
+
 ### Circuit
 La course d'origine : 8 portes, 1 tour, sur la route du circuit avec ses barrières. Point de départ : « Start race! ».
 
@@ -112,7 +114,7 @@ Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand to
 ```json
 {
   "format": "bs-folio-tas-movie", "version": 2, "game": "brunosimon/folio-2025", "course": "tour", "track": 2, "fps": 60,
-  "result": { "frames": 1652, "time": 27.533, "timings": [ … ] },
+  "result": { "frames": 1652, "time": 27.533, "timings": [ … ] },   // timings : temps de passage aux portes, en ms
   "inputs": [ [ gaz, direction, boost, frein, "suspensions" ], … ]
 }
 ```
