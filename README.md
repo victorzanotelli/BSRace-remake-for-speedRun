@@ -30,6 +30,11 @@ Circuit 0 → 7 → *sortie* → Bowling → Accueil → Toilettes → Succès �
 
 - Départ : le point « **Grand tour!** », juste à côté de « Start race! » (6 m plus loin).
 - **Ordre imposé** : seule la prochaine porte est active (surlignée) ; une porte franchie dans le désordre ne compte pas.
+- **Guidage** (depuis 1.4.1) :
+  - en haut à gauche, le nom de la prochaine porte et la distance qui reste, en suivant le trajet praticable ;
+  - une **flèche au sol** autour de la voiture, dès la sortie du circuit : elle montre la direction à prendre en suivant un trajet praticable (elle contourne l'eau et les bâtiments) et s'efface quand la porte est à moins de 14 m ;
+  - une **colonne lumineuse** sur la porte visée, qui la repère derrière les arbres quand on approche.
+  Tout cela n'est que de l'affichage : les movies restent valables.
 - Le compteur affiche `portes franchies / 20` et, dans l'éditeur, le nom de la prochaine porte.
 - Hors du circuit, on roule librement sur l'île. L'eau peu profonde ralentit fortement mais ne fait pas perdre (Autel, bras d'eau vers les Toilettes). En eau profonde, ou dans le gouffre de l'Autel, la voiture est replacée devant la dernière porte franchie.
 - Pendant la course, les étiquettes des zones sont masquées et les caisses explosives collées à une porte sont retirées (5 caisses).
@@ -137,7 +142,7 @@ Chaîne utilisée pour placer les portes et vérifier que le parcours est faisab
 ```bash
 cd tools/grand-tour && npm install playwright
 node geom.mjs                       # géométrie de la route et des portes du circuit → circuit-geom.json
-python3 gen_tour_a.py tangents      # portes et ouvertures → sources/data/grandTour.js (puis recompiler le jeu)
+python3 gen_tour_a.py tangents      # portes, ouvertures et trajet de guidage (path.json) → sources/data/grandTour.js (puis recompiler)
 node map2.mjs                       # relevé de l'île en course (route, terrain, barrières, obstacles, 0,5 m) → map-a.json
 python3 path_a.py                   # trajet A* porte à porte, en passant par les ouvertures → path.json, tangents_a.json
 python3 render_a.py carte.png       # image de contrôle (barrières, portes, trajet)

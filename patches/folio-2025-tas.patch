@@ -2116,18 +2116,18 @@ index 3bbb2bb..e38c47f 100644
                  gsap.delayedCall(2.2, () =>
                  {
 diff --git a/sources/Game/World/Areas/CircuitArea.js b/sources/Game/World/Areas/CircuitArea.js
-index bb760e6..11dbea9 100644
+index bb760e6..6d74ad5 100644
 --- a/sources/Game/World/Areas/CircuitArea.js
 +++ b/sources/Game/World/Areas/CircuitArea.js
 @@ -10,6 +10,7 @@ import { alea } from 'seedrandom'
  import { InputFlag } from '../../InputFlag.js'
  import { Area } from './Area.js'
  import { timeToRaceString, timeToReadableString } from '../../utilities/time.js'
-+import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY } from '../../../data/grandTour.js'
++import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY, grandTourGuide } from '../../../data/grandTour.js'
  
  export class CircuitArea extends Area
  {
-@@ -37,6 +38,7 @@ export class CircuitArea extends Area
+@@ -37,15 +38,16 @@ export class CircuitArea extends Area
          this.setStartPosition()
          this.setStartingLights()
          this.setTimer()
@@ -2135,7 +2135,9 @@ index bb760e6..11dbea9 100644
          this.setCheckpoints()
          this.setResetObjects()
          this.setObstacles()
-@@ -45,7 +47,6 @@ export class CircuitArea extends Area
+         this.setRoad()
+         this.setRails()
++        this.setGuide()
          this.setInteractivePoint()
          this.setStartAnimation()
          this.setRespawn()
@@ -2143,7 +2145,7 @@ index bb760e6..11dbea9 100644
          this.setAirDancers()
          this.setBanners()
          this.setMenu()
-@@ -317,36 +318,26 @@ export class CircuitArea extends Area
+@@ -317,36 +319,26 @@ export class CircuitArea extends Area
          this.checkpoints.reachedCount = 0
          this.checkpoints.timings = []
  
@@ -2189,16 +2191,14 @@ index bb760e6..11dbea9 100644
  
              checkpoint.a.rotateAround(checkpoint.center, - checkpoint.rotation)
              checkpoint.b.rotateAround(checkpoint.center, - checkpoint.rotation)
-@@ -429,14 +420,43 @@ export class CircuitArea extends Area
+@@ -429,14 +421,43 @@ export class CircuitArea extends Area
                  this.checkpoints.target
              }
  
 -            this.checkpoints.count = this.checkpoints.items.length
 +            return checkpoint
 +        }
- 
--            // Save
--            this.checkpoints.items.push(checkpoint)
++
 +        // Circuit
 +        const circuitItems = []
 +        let i = 0
@@ -2207,6 +2207,8 @@ index bb760e6..11dbea9 100644
 +            baseCheckpoint.rotation.reorder('YXZ')
 +            baseCheckpoint.visible = false
  
+-            // Save
+-            this.checkpoints.items.push(checkpoint)
 +            // Respawn position
 +            const respawnPosition = baseCheckpoint.position.clone()
 +            const direction = new THREE.Vector2(3, 0)
@@ -2214,7 +2216,7 @@ index bb760e6..11dbea9 100644
 +            respawnPosition.x += direction.y
 +            respawnPosition.y = 4
 +            respawnPosition.z += direction.x
-+
+ 
 +            circuitItems.push(createCheckpoint(i, baseCheckpoint.position, baseCheckpoint.rotation.y, baseCheckpoint.scale.x * 0.5, respawnPosition))
              i++
          }
@@ -2236,7 +2238,7 @@ index bb760e6..11dbea9 100644
          // Checkpoint doors
          const doorIntensity = uniform(2)
          const doorOutputColor = Fn(([doorColor, doorScale]) =>
-@@ -508,6 +528,16 @@ export class CircuitArea extends Area
+@@ -508,6 +529,16 @@ export class CircuitArea extends Area
          }
      }
  
@@ -2253,7 +2255,7 @@ index bb760e6..11dbea9 100644
      setResetObjects()
      {
          this.resetObjects = {}
-@@ -564,9 +594,171 @@ export class CircuitArea extends Area
+@@ -564,9 +595,171 @@ export class CircuitArea extends Area
          railsMesh.material.side = THREE.DoubleSide
  
          this.rails.object = railsMesh.userData.object
@@ -2426,8 +2428,195 @@ index bb760e6..11dbea9 100644
              this.game.objects.enable(this.rails.object)
          }
          
-@@ -580,9 +772,9 @@ export class CircuitArea extends Area
+@@ -578,11 +771,196 @@ export class CircuitArea extends Area
+         this.rails.deactivate()
+     }
  
++    setGuide()
++    {
++        // Grand tour : flèche au sol autour de la voiture vers la prochaine porte (en suivant le trajet praticable),
++        // et faisceau lumineux au-dessus de la porte visée. Affichage seulement : rien ne change dans la physique.
++        this.guide = {}
++        this.guide.points = grandTourGuide.points.map(([ x, z ]) => new THREE.Vector2(x, z))
++        this.guide.legEnds = grandTourGuide.legEnds
++        this.guide.firstLeg = 8                 // flèche à partir de la sortie du circuit (après la porte 7)
++        this.guide.lookAhead = 10               // point visé : 10 m plus loin sur le trajet
++        this.guide.hideDistance = 14            // porte assez proche : la flèche s'efface
++        this.guide.opacity = 0
++        const targetColor = this.checkpoints.doorTarget.color
++        const elapsed = this.game.ticker.elapsedScaledUniform
++
++        // Flèche (dessinée vers +x, posée à plat)
++        {
++            const shape = new THREE.Shape()
++            shape.moveTo(-1.8, -0.45)
++            shape.lineTo(0.3, -0.45)
++            shape.lineTo(0.3, -1.2)
++            shape.lineTo(2, 0)
++            shape.lineTo(0.3, 1.2)
++            shape.lineTo(0.3, 0.45)
++            shape.lineTo(-1.8, 0.45)
++            shape.closePath()
++            const geometry = new THREE.ShapeGeometry(shape)
++            geometry.rotateX(- Math.PI * 0.5)
++
++            this.guide.arrowOpacity = uniform(0)
++            // toujours visible (même derrière un arbre ou une barrière)
++            const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, depthTest: false, side: THREE.DoubleSide })
++            const pulse = sin(elapsed.mul(6)).mul(0.15).add(0.85)
++            material.outputNode = vec4(targetColor.mul(2), this.guide.arrowOpacity.mul(pulse))
++
++            const mesh = new THREE.Mesh(geometry, material)
++            mesh.renderOrder = 10
++            mesh.castShadow = false
++            mesh.receiveShadow = false
++            mesh.visible = false
++            mesh.frustumCulled = false
++            this.game.scene.add(mesh)
++            this.guide.arrow = mesh
++        }
++
++        // Faisceau (colonne lumineuse ouverte, qui s'estompe vers le haut, pas de brouillard)
++        {
++            // la caméra du jeu est basse et proche : au-delà d'une dizaine de mètres, le faisceau traverserait l'écran
++            const height = 10
++            const geometry = new THREE.CylinderGeometry(0.7, 0.7, height, 20, 1, true)
++            geometry.translate(0, height * 0.5, 0)
++
++            const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending })
++            material.fog = false
++            const fade = uv().y.oneMinus().pow(1.5)
++            const pulse = sin(elapsed.mul(3)).mul(0.15).add(0.85)
++            this.guide.beamOpacity = uniform(0)
++            material.outputNode = vec4(targetColor.mul(2), fade.mul(0.6).mul(pulse).mul(this.guide.beamOpacity))
++
++            const mesh = new THREE.Mesh(geometry, material)
++            mesh.renderOrder = 10
++            mesh.castShadow = false
++            mesh.receiveShadow = false
++            mesh.visible = false
++            this.game.scene.add(mesh)
++            this.guide.beam = mesh
++        }
++
++        // Indication écrite : prochaine porte et distance (en suivant le trajet)
++        this.guide.label = document.createElement('div')
++        this.guide.label.className = 'grand-tour-guide'
++        Object.assign(this.guide.label.style, {
++            position: 'fixed', top: '16px', left: '16px', zIndex: 5, pointerEvents: 'none',
++            padding: '8px 14px', borderRadius: '10px', background: 'rgba(16, 16, 24, 0.6)', color: '#ffffff',
++            font: '600 18px/1.2 system-ui, sans-serif', letterSpacing: '0.02em', display: 'none'
++        })
++        document.body.appendChild(this.guide.label)
++        this.guide.labelText = ''
++
++        this.guide.hide = () =>
++        {
++            this.guide.label.style.display = 'none'
++            this.guide.labelText = ''
++            this.guide.arrow.visible = false
++            this.guide.beam.visible = false
++            this.guide.beamOpacity.value = 0
++            this.guide.opacity = 0
++            this.guide.arrowOpacity.value = 0
++        }
++
++        const closest = new THREE.Vector2()
++        this.guide.update = () =>
++        {
++            const target = this.checkpoints.target
++            if(this.course !== 'tour' || this.state !== CircuitArea.STATE_RUNNING || !target)
++            {
++                if(this.guide.arrow.visible || this.guide.beam.visible)
++                    this.guide.hide()
++                return
++            }
++
++            // Flèche : hors du circuit seulement
++            const reached = this.checkpoints.reachedCount
++            const player = this.game.physicalVehicle.position
++            const gateDistance = Math.hypot(target.position.x - player.x, target.position.z - player.z)
++
++            // Faisceau sur la porte visée : s'efface tout près, plein à partir de 12 m
++            this.guide.beamOpacity.value = Math.min(1, Math.max(0, (gateDistance - 4) / 8))
++            this.guide.beam.visible = this.guide.beamOpacity.value > 0.01
++            this.guide.beam.position.set(target.position.x, 0, target.position.z)
++            let wanted = reached >= this.guide.firstLeg && gateDistance > this.guide.hideDistance ? 1 : 0
++
++            let direction = null
++            if(wanted)
++            {
++                const points = this.guide.points
++                const start = this.guide.legEnds[reached - 1] ?? 0
++                const end = this.guide.legEnds[Math.min(reached, this.guide.legEnds.length - 1)]
++
++                // Point du trajet le plus proche (sur le tronçon de la porte visée)
++                let bestIndex = start, bestT = 0, bestDistance = Infinity
++                for(let i = start; i < end; i++)
++                {
++                    const a = points[i], b = points[i + 1]
++                    const vx = b.x - a.x, vz = b.y - a.y
++                    const length2 = vx * vx + vz * vz || 1
++                    const t = Math.max(0, Math.min(1, ((player.x - a.x) * vx + (player.z - a.y) * vz) / length2))
++                    const d = Math.hypot(a.x + vx * t - player.x, a.y + vz * t - player.z)
++                    if(d < bestDistance) { bestDistance = d; bestIndex = i; bestT = t }
++                }
++
++                // Point visé : lookAhead mètres plus loin sur le trajet (au plus la porte)
++                const a = points[bestIndex], b = points[Math.min(bestIndex + 1, end)]
++                closest.set(a.x + (b.x - a.x) * bestT, a.y + (b.y - a.y) * bestT)
++                let remaining = this.guide.lookAhead + Math.min(bestDistance, 6)
++                let x = closest.x, z = closest.y
++                for(let i = bestIndex + 1; i <= end && remaining > 0; i++)
++                {
++                    const p = points[i]
++                    const d = Math.hypot(p.x - x, p.y - z)
++                    if(d >= remaining) { x += (p.x - x) * remaining / d; z += (p.y - z) * remaining / d; remaining = 0 }
++                    else { remaining -= d; x = p.x; z = p.y }
++                }
++                direction = Math.atan2(z - player.z, x - player.x)
++
++                // Distance restante en suivant le trajet
++                let pathDistance = bestDistance + Math.hypot(points[Math.min(bestIndex + 1, end)].x - closest.x, points[Math.min(bestIndex + 1, end)].y - closest.y)
++                for(let i = bestIndex + 1; i < end; i++)
++                    pathDistance += points[i].distanceTo(points[i + 1])
++                this.guide.distance = pathDistance
++            }
++            else
++                this.guide.distance = gateDistance
++
++            // Texte : prochaine porte et distance
++            const total = this.checkpoints.count + 2
++            const name = reached === total - 1 ? 'Arrivée' : target.label || (reached === 0 ? 'Ligne de départ' : `Circuit ${target.index}`)
++            const text = `➜ ${name} · ${Math.round(this.guide.distance)} m`
++            if(text !== this.guide.labelText)
++            {
++                this.guide.labelText = text
++                this.guide.label.textContent = text
++                this.guide.label.style.display = 'block'
++            }
++
++            // Apparition / disparition en douceur
++            this.guide.opacity += (wanted - this.guide.opacity) * Math.min(1, this.game.ticker.deltaScaled * 4)
++            this.guide.arrowOpacity.value = this.guide.opacity * 0.9
++            this.guide.arrow.visible = this.guide.opacity > 0.01
++
++            if(this.guide.arrow.visible)
++            {
++                if(direction !== null)
++                    this.guide.direction = direction
++                const angle = this.guide.direction ?? 0
++                const radius = 4.5
++                this.guide.arrow.position.set(
++                    player.x + Math.cos(angle) * radius,
++                    Math.max(player.y - 0.9, 0.08),
++                    player.z + Math.sin(angle) * radius
++                )
++                this.guide.arrow.rotation.y = - angle
++            }
++        }
++    }
++
      setInteractivePoint()
      {
 -        this.interactivePoint = this.game.interactivePoints.create(
@@ -2439,7 +2628,7 @@ index bb760e6..11dbea9 100644
              InteractivePoints.ALIGN_RIGHT,
              InteractivePoints.STATE_CONCEALED,
              () =>
-@@ -592,7 +784,7 @@ export class CircuitArea extends Area
+@@ -592,7 +970,7 @@ export class CircuitArea extends Area
                  if(sound)
                      sound.play(true)
  
@@ -2448,7 +2637,7 @@ index bb760e6..11dbea9 100644
              },
              () =>
              {
-@@ -607,6 +799,18 @@ export class CircuitArea extends Area
+@@ -607,6 +985,18 @@ export class CircuitArea extends Area
                  this.game.inputs.interactiveButtons.removeItems(['interact'])
              }
          )
@@ -2467,7 +2656,7 @@ index bb760e6..11dbea9 100644
      }
  
      setStartAnimation()
-@@ -1348,11 +1552,15 @@ export class CircuitArea extends Area
+@@ -1348,11 +1738,15 @@ export class CircuitArea extends Area
          this.menu.inputFlag = new InputFlag(this.menu.inputGroup.querySelector('.js-input-flag'))
      }
  
@@ -2484,7 +2673,7 @@ index bb760e6..11dbea9 100644
          // Area frustum
          this.frustum.alwaysVisible = true
  
-@@ -1387,13 +1595,19 @@ export class CircuitArea extends Area
+@@ -1387,13 +1781,19 @@ export class CircuitArea extends Area
                  this.startPosition.rotation
              )
  
@@ -2508,7 +2697,7 @@ index bb760e6..11dbea9 100644
              // Starting lights
              this.startingLights.reset()
  
-@@ -1412,7 +1626,10 @@ export class CircuitArea extends Area
+@@ -1412,7 +1812,10 @@ export class CircuitArea extends Area
              this.resetObjects.reset()
  
              // Crates (all crates in the world?)
@@ -2520,7 +2709,7 @@ index bb760e6..11dbea9 100644
  
              // Weather
              this.game.weather.override.start(
-@@ -1438,7 +1655,7 @@ export class CircuitArea extends Area
+@@ -1438,7 +1841,7 @@ export class CircuitArea extends Area
              // Timer
              this.timer.show()
  
@@ -2529,7 +2718,17 @@ index bb760e6..11dbea9 100644
              this.rails.activate()
  
              // Podium => Hide
-@@ -1545,6 +1762,13 @@ export class CircuitArea extends Area
+@@ -1525,6 +1928,9 @@ export class CircuitArea extends Area
+         this.checkpoints.target = null
+         this.checkpoints.doorTarget.mesh.visible = false
+ 
++        // Guidage
++        this.guide.hide()
++
+         // Sound
+         if(!forced)
+         {
+@@ -1545,6 +1951,13 @@ export class CircuitArea extends Area
                  // Menu buttons
                  this.menu.racingButtons.classList.remove('is-active')
  
@@ -2543,7 +2742,7 @@ index bb760e6..11dbea9 100644
                  // Interactive point
                  this.interactivePoint.show()
  
-@@ -1589,7 +1813,7 @@ export class CircuitArea extends Area
+@@ -1589,7 +2002,7 @@ export class CircuitArea extends Area
                  {
                      this.game.achievements.setProgress('circuitFinish', 1)
  
@@ -2552,7 +2751,7 @@ index bb760e6..11dbea9 100644
                          this.game.achievements.setProgress('circuitFinishFast', 1)
                  }
  
-@@ -1602,8 +1826,8 @@ export class CircuitArea extends Area
+@@ -1602,8 +2015,8 @@ export class CircuitArea extends Area
                      })
                  }
  
@@ -2563,6 +2762,16 @@ index bb760e6..11dbea9 100644
                  {
                      gsap.delayedCall(1, () =>
                      {
+@@ -1648,6 +2061,9 @@ export class CircuitArea extends Area
+                     checkpoint.reach()
+             }
+ 
++            // Guidage du Grand tour (flèche et faisceau)
++            this.guide.update()
++
+             // Obstacles
+             for(const obstacle of this.obstacles.items)
+             {
 diff --git a/sources/Game/World/ExplosiveCrates.js b/sources/Game/World/ExplosiveCrates.js
 index d6fd7e3..dda66cf 100644
 --- a/sources/Game/World/ExplosiveCrates.js
@@ -2600,10 +2809,10 @@ index d6fd7e3..dda66cf 100644
                  crate.object.physical.body.setEnabled(true)
 diff --git a/sources/data/grandTour.js b/sources/data/grandTour.js
 new file mode 100644
-index 0000000..68e1d5d
+index 0000000..3997617
 --- /dev/null
 +++ b/sources/data/grandTour.js
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,37 @@
 +/**
 + * Grand tour (tracé A) : un tour complet du circuit avec ses barrières (portes 0 à 7),
 + * sortie par une ouverture juste après la porte 7, une porte par zone de l'île,
@@ -2634,6 +2843,13 @@ index 0000000..68e1d5d
 +
 +// Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
 +export const grandTourOutOfBoundsY = -1.0
++
++// Guidage : trajet praticable porte à porte (flèche au sol), calculé sur la carte de l'île (tools/grand-tour/path_a.py)
++// legEnds[k] = indice, dans points, de la porte visée quand k portes ont été franchies
++export const grandTourGuide = {
++    points: [ [-9.2, 5.8], [-11.2, -0.2], [-8.2, -19.8], [-1.2, -20.8], [-0.2, -25.8], [3.8, -29.2], [3.2, -33.8], [6.8, -36.8], [14.8, -36.8], [25.2, -44.8], [37.2, -47.8], [53.2, -57.8], [52.2, -71.8], [39.8, -80.2], [23.8, -82.8], [17.8, -77.8], [2.8, -81.8], [-3.2, -80.2], [-12.2, -72.2], [-15.2, -47.2], [-22.2, -31.2], [-61.8, -27.2], [-81.8, -38.2], [-76.2, -58.8], [-81.8, -63.2], [-79.8, -67.2], [-70.8, -79.2], [-43.2, -77.2], [-38.2, -66.2], [-45.2, -78.8], [-73.2, -77.8], [-79.2, -67.8], [-81.8, -63.8], [-75.8, -57.8], [-82.2, -38.8], [-56.8, -24.2], [-41.8, -22.2], [-42.8, 8.8], [-52.2, 12.8], [-60.8, 15.8], [-82.2, 27.8], [-80.8, 33.2], [-76.2, 37.2], [-80.8, 41.2], [-81.8, 47.2], [-76.8, 49.8], [-73.2, 61.8], [-56.2, 70.8], [-27.2, 65.8], [-24.8, 66.8], [-11.8, 60.2], [1.8, 68.8], [10.2, 71.8], [12.8, 73.2], [15.2, 73.2], [16.2, 72.2], [23.8, 60.8], [43.8, 48.8], [47.8, 55.8], [48.2, 56.2], [62.2, 61.8], [62.8, 61.8], [63.2, 61.8], [63.8, 61.8], [64.2, 61.8], [64.8, 61.2], [65.2, 61.2], [65.8, 61.2], [66.2, 61.2], [66.8, 61.2], [67.2, 60.8], [72.2, 55.2], [76.8, 34.2], [76.8, 27.2], [69.8, 19.8], [77.2, 15.8], [79.2, 4.8], [75.2, 0.8], [58.8, -3.8], [57.8, -4.8], [52.8, -8.2], [49.2, -20.8], [54.2, -31.8], [52.2, -34.8], [52.2, -35.8], [54.2, -37.8], [58.2, -37.8], [61.8, -34.8], [62.2, -34.2], [66.2, -29.2], [66.2, -28.8], [66.2, -28.2], [66.2, -27.8], [66.2, -28.2], [66.2, -28.8], [66.2, -29.2], [66.2, -31.2], [64.2, -33.2], [63.2, -33.2], [62.8, -33.2], [47.8, -15.2], [45.2, -26.2], [33.8, -27.2], [38.8, -15.2], [25.8, -0.2], [27.8, 18.2], [28.8, 18.8], [14.8, 22.8], [7.2, 23.8], [4.2, 33.2], [3.8, 33.8], [3.2, 33.8], [2.8, 33.8], [2.2, 33.2], [1.8, 33.2], [1.2, 33.2], [0.8, 33.2], [0.2, 33.2], [-4.8, 35.8], [-8.8, 23.8], [-11.2, -0.2] ],
++    legEnds: [ 1, 10, 13, 19, 21, 28, 39, 47, 51, 57, 60, 74, 92, 100, 102, 104, 106, 107, 110, 120 ]
++}
 diff --git a/sources/index.js b/sources/index.js
 index e82f637..6257d22 100644
 --- a/sources/index.js

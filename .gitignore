@@ -1,1 +1,26 @@
+# Dépendances
+node_modules/
+tools/node_modules/
+tools/grand-tour/node_modules/
+
+# Compilation : jeu copié dans app/, exécutables dans dist/ (publiés dans les Releases, pas dans le dépôt)
+app/
+dist/
+*.AppImage
+BS-Folio-Race-*.zip
+BSRace-TAS-sources-*.zip
+
+# Fichiers produits par les outils du Grand tour (recalculables)
+tools/grand-tour/map-a.json
+tools/grand-tour/circuit-geom.json
+tools/grand-tour/path.json
+tools/grand-tour/autopilot-tour.json
+tools/grand-tour/*.png
+*.log
+
+# Système
+.DS_Store
+Thumbs.db
+
+# Perso
 toDoList.txt

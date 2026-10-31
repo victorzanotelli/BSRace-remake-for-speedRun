@@ -52,5 +52,18 @@ export const grandTourRailGaps = [
 // Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
 export const grandTourOutOfBoundsY = -1.0
 """
+# Guidage (flèche au sol) : trajet praticable calculé par path_a.py (contourne l'eau et les bâtiments)
+# points : [x, z] ; legEnds[k] : indice du point de la porte visée quand k portes ont été franchies
+if os.path.exists('path.json'):
+    path = json.load(open('path.json'))
+    pts = ', '.join(f'[{x:.1f}, {z:.1f}]' for x, z in path['path'])
+    src += """
+// Guidage : trajet praticable porte à porte (flèche au sol), calculé sur la carte de l'île (tools/grand-tour/path_a.py)
+// legEnds[k] = indice, dans points, de la porte visée quand k portes ont été franchies
+export const grandTourGuide = {
+    points: [ """ + pts + """ ],
+    legEnds: [ """ + ', '.join(str(i) for i in path['gateIdx']) + """ ]
+}
+"""
 open(SRC, 'w').write(src)
 print(src)
