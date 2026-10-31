@@ -5,6 +5,7 @@ Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https
 - Le jeu démarre directement à côté du circuit.
 - Deux épreuves : le **Circuit** d'origine (~35 s) et le **Grand tour** : un tour du circuit puis toute l'île (20 portes, ~1 min 30 à 2 min).
 - **F9** bascule entre le jeu normal et l'éditeur TAS.
+- **F10** (ou menu ☰ → Options → Touches) : changer les touches du clavier.
 - F11 : plein écran · F12 : outils de développement.
 
 ## Lancer
@@ -15,6 +16,16 @@ Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https
 | Linux | `BS-Folio-Race-<version>-x86_64.AppImage` | `chmod +x` puis `./BS-Folio-Race-…AppImage` (sous WSL : ajouter `--appimage-extract-and-run`) |
 
 Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglages du jeu), `--webgpu` (Linux : tenter WebGPU au lieu de WebGL2).
+
+## Touches (jeu normal)
+
+**F10**, ou le menu ☰ → Options → « Touches », ouvre la fenêtre des touches : cliquez sur une case puis appuyez sur la nouvelle touche (Échap : annuler, Retour arrière : vider la case, « Réinitialiser » : touches d'origine). Deux touches par action : avancer, reculer, gauche, droite, boost, frein, saut, replacer la voiture, recommencer la course, klaxon.
+
+- Une touche ne sert qu'à une action : la donner à une action la retire des autres. Exception : « Replacer la voiture » (balade) et « Recommencer la course » (course) peuvent partager la même touche, comme R à l'origine.
+- Si le jeu se sert déjà de la touche pour autre chose (M pour la carte, par exemple), la fenêtre le signale.
+- Échap, F9, F10, F11 et F12 sont réservées.
+- Les touches de conduite sont **communes avec l'éditeur TAS** (enregistrement) : les changer ici ou dans les réglages de l'éditeur (⚙) revient au même. La manette n'est pas modifiée.
+- Elles sont enregistrées sur l'ordinateur et gardées d'une version à l'autre.
 
 ## Les épreuves
 
@@ -33,7 +44,6 @@ Circuit 0 → 7 → *sortie* → Bowling → Accueil → Toilettes → Succès �
 - **Guidage** (depuis 1.4.1) :
   - en haut à gauche, le nom de la prochaine porte et la distance qui reste, en suivant le trajet praticable ;
   - une **flèche au sol** autour de la voiture, dès la sortie du circuit : elle montre la direction à prendre en suivant un trajet praticable (elle contourne l'eau et les bâtiments) et s'efface quand la porte est à moins de 14 m ;
-  - une **colonne lumineuse** sur la porte visée, qui la repère derrière les arbres quand on approche.
   Tout cela n'est que de l'affichage : les movies restent valables.
 - Le compteur affiche `portes franchies / 20` et, dans l'éditeur, le nom de la prochaine porte.
 - Hors du circuit, on roule librement sur l'île. L'eau peu profonde ralentit fortement mais ne fait pas perdre (Autel, bras d'eau vers les Toilettes). En eau profonde, ou dans le gouffre de l'Autel, la voiture est replacée devant la dernière porte franchie.
@@ -121,7 +131,7 @@ Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand to
 ./build.sh            # clone folio-2025, applique patches/folio-2025-tas.patch, compile, emballe
 ```
 
-Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates), `sources/Game/TasEditor.js` (interface) et `sources/data/grandTour.js` (portes et ouvertures du Grand tour), modifie `World/Areas/CircuitArea.js` (deux épreuves, barrières avec ouvertures), `World/Areas/AltarArea.js` (gouffre de l'Autel pendant une course) et `World/ExplosiveCrates.js` (caisses retirées) et trois lignes (`index.js`, `Rendering.js`, `Game.js` pour charger Rapier déterministe en mode TAS). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
+Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates), `sources/Game/TasEditor.js` (interface), `sources/Game/KeyBindings.js` (touches du jeu normal) et `sources/data/grandTour.js` (portes et ouvertures du Grand tour), modifie `World/Areas/CircuitArea.js` (deux épreuves, barrières avec ouvertures), `World/Areas/AltarArea.js` (gouffre de l'Autel pendant une course) et `World/ExplosiveCrates.js` (caisses retirées) et quelques lignes de `index.js`, `Rendering.js` et `Game.js` (Rapier déterministe en mode TAS, fenêtre des touches). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
 
 Les exécutables (> 100 Mo) se publient dans les **Releases** GitHub, pas dans le dépôt.
 

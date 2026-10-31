@@ -14,7 +14,7 @@ cd "$SRC"
 git fetch -q origin || true
 git checkout -q "$COMMIT"
 git checkout -q -- sources
-rm -f sources/Game/Tas.js sources/Game/TasEditor.js sources/data/grandTour.js
+rm -f sources/Game/Tas.js sources/Game/TasEditor.js sources/Game/KeyBindings.js sources/data/grandTour.js
 git apply "$HERE/patches/folio-2025-tas.patch"
 
 # 2. Compilation du jeu (.env obligatoire : sans VITE_WHISPERS_COUNT, le rendu WebGPU plante)
