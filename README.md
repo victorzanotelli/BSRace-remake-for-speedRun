@@ -3,7 +3,7 @@
 Version jouable hors ligne de la course du [portfolio 2025 de Bruno Simon](https://github.com/brunosimon/folio-2025) (licence MIT), pour Linux et Windows, avec un **éditeur TAS** intégré.
 
 - Le jeu démarre directement à côté du circuit.
-- Deux épreuves : le **Circuit** d'origine (~35 s) et le **Grand tour** : un tour du circuit puis toute l'île (20 portes, ~1 min 30 à 2 min).
+- Deux épreuves : le **Circuit** d'origine (~35 s) et le **Grand tour** : un tour du circuit puis une piste à barrières sur l'île aplanie (20 portes, ~1 min à 1 min 30).
 - **F9** bascule entre le jeu normal et l'éditeur TAS.
 - **F10** (ou menu ☰ → Options → Touches) : changer les touches du clavier.
 - F11 : plein écran · F12 : outils de développement.
@@ -34,25 +34,22 @@ Options : `--tas` (ouvrir directement l'éditeur), `--debug` (panneau de réglag
 ### Circuit
 La course d'origine : 8 portes, 1 tour, sur la route du circuit avec ses barrières. Point de départ : « Start race! ».
 
-### Grand tour (tracé A, depuis 1.4.0)
-Un tour complet du **circuit, avec ses barrières** (portes 0 à 7), puis on sort sur l'île par une **ouverture dans la barrière juste après la porte 7**, on passe **une porte par zone**, et on rentre sur le circuit par une **seconde ouverture juste avant la ligne** pour l'arrivée :
+### Grand tour (tracé B, depuis 1.5.0)
+Un tour complet du **circuit, avec ses barrières** (portes 0 à 7). Juste après la porte 7, une **ouverture dans la barrière** mène à une **piste de l'île bordée de barrières**, avec route et vibreurs, qui passe par une porte par zone. Une seconde ouverture, juste avant la ligne, ramène sur le circuit pour l'arrivée :
 
 Circuit 0 → 7 → *sortie* → Bowling → Accueil → Toilettes → Succès → Autel → Coulisses → Social → Carrière → Projets → Labo → Cookie → *entrée* → **arrivée sur la ligne de départ**.
 
-![Tracé A](docs/grand-tour-trace-a.png)
+![Tracé B](docs/grand-tour-trace-b.png)
 
+- **Île aplanie** pendant la course : tout ce qui est hors du circuit de base disparaît (arbres, buissons, rochers, bâtiments et décor des zones, objets mobiles). Tout revient à la fin de la course ; le Circuit et la balade ne sont pas touchés. L'eau est gardée : la route de l'île passe dessus, au niveau du sol.
 - Départ : le point « **Grand tour!** », juste à côté de « Start race! » (6 m plus loin).
 - **Ordre imposé** : seule la prochaine porte est active (surlignée) ; une porte franchie dans le désordre ne compte pas.
-- **Guidage** (depuis 1.4.1) :
-  - en haut à gauche, le nom de la prochaine porte et la distance qui reste, en suivant le trajet praticable ;
-  - une **flèche au sol** autour de la voiture, dès la sortie du circuit : elle montre la direction à prendre en suivant un trajet praticable (elle contourne l'eau et les bâtiments) et s'efface quand la porte est à moins de 14 m ;
-  Tout cela n'est que de l'affichage : les movies restent valables.
+- **Guidage** : en haut à gauche, le nom de la prochaine porte et la distance qui reste ; sur l'île, une **flèche au sol** autour de la voiture.
 - Le compteur affiche `portes franchies / 20` et, dans l'éditeur, le nom de la prochaine porte.
-- Hors du circuit, on roule librement sur l'île. L'eau peu profonde ralentit fortement mais ne fait pas perdre (Autel, bras d'eau vers les Toilettes). En eau profonde, ou dans le gouffre de l'Autel, la voiture est replacée devant la dernière porte franchie.
-- Pendant la course, les étiquettes des zones sont masquées et les caisses explosives collées à une porte sont retirées (5 caisses).
+- En eau profonde, la voiture est replacée devant la dernière porte franchie.
 - Le classement en ligne et le succès « circuit rapide » restent réservés au Circuit.
-- Temps de référence : `grand-tour-demo-pilote-auto.json`, un movie produit par un pilote automatique (suivi de trajectoire, sans optimisation) : **1:33.350**. Il est battable, il sert de premier objectif et de preuve que le parcours se boucle.
-- Les movies du Grand tour faits avec la 1.3.0 (ancien tracé, sans barrières) ne se rejouent plus : l'éditeur prévient à l'ouverture.
+- Temps de référence : `grand-tour-demo-pilote-auto.json`, un movie produit par un pilote automatique (suivi de trajectoire, sans optimisation) : **1:06.817**. Il est battable : c'est un premier objectif et la preuve que le parcours se boucle.
+- Les movies du Grand tour des versions 1.3 et 1.4 (anciens tracés) ne se rejouent plus : l'éditeur prévient à l'ouverture.
 
 ## L'éditeur TAS
 
@@ -120,7 +117,7 @@ Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand to
 ```
 
 - `course` : `"circuit"` ou `"tour"` (absent = circuit, pour les anciens movies).
-- `track` : version du tracé du Grand tour (`2` = tracé A depuis 1.4.0 ; absent = ancien tracé 1.3.0).
+- `track` : version du tracé du Grand tour (`3` = tracé B depuis 1.5.0 ; `2` = tracé A des versions 1.4 ; absent = tracé de la 1.3.0).
 - Version 2 : l'entrée 0 est celle de l'image du départ. Les movies en version 1 (éditeur 1.1.0) restent lisibles : une image neutre est ajoutée au début à l'ouverture, pour garder le même timing.
 - `gaz` : -1 à 1.
 - `direction` : -1 à 1 ; **+1 = gauche**, -1 = droite (convention du jeu).
@@ -133,7 +130,7 @@ Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand to
 ./build.sh            # clone folio-2025, applique patches/folio-2025-tas.patch, compile, emballe
 ```
 
-Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates), `sources/Game/TasEditor.js` (interface), `sources/Game/KeyBindings.js` (touches du jeu normal) et `sources/data/grandTour.js` (portes et ouvertures du Grand tour), modifie `World/Areas/CircuitArea.js` (deux épreuves, barrières avec ouvertures), `World/Areas/AltarArea.js` (gouffre de l'Autel pendant une course) et `World/ExplosiveCrates.js` (caisses retirées) et quelques lignes de `index.js`, `Rendering.js` et `Game.js` (Rapier déterministe en mode TAS, fenêtre des touches). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
+Le correctif `patches/folio-2025-tas.patch` ajoute `sources/Game/Tas.js` (mode déterministe, savestates), `sources/Game/TasEditor.js` (interface), `sources/Game/KeyBindings.js` (touches du jeu normal), `sources/Game/World/Flatten.js` (île aplanie) et `sources/data/grandTour.js` (portes, ouvertures et piste de l'île), modifie `World/Areas/CircuitArea.js` (deux épreuves, barrières avec ouvertures, piste de l'île), `Terrain.js` (pas d'herbe sur la piste), `World/World.js`, `World/Areas/AltarArea.js` (gouffre de l'Autel pendant une course) et `World/ExplosiveCrates.js` (caisses retirées) et quelques lignes de `index.js`, `Rendering.js` et `Game.js` (Rapier déterministe en mode TAS, fenêtre des touches). Il s'applique sur le commit indiqué dans `patches/UPSTREAM_COMMIT`.
 
 Les exécutables (> 100 Mo) se publient dans les **Releases** GitHub, pas dans le dépôt.
 
@@ -149,23 +146,22 @@ node savestate-test.mjs ../../folio-2025/dist  # savestates et retours en arriè
 
 ### Recalculer le Grand tour (`tools/grand-tour/`)
 
-Chaîne utilisée pour placer les portes et vérifier que le parcours est faisable :
+Chaîne utilisée pour tracer la piste de l'île et vérifier qu'elle se boucle :
 
 ```bash
 cd tools/grand-tour && npm install playwright
-node geom.mjs                       # géométrie de la route et des portes du circuit → circuit-geom.json
-python3 gen_tour_a.py tangents      # portes, ouvertures et trajet de guidage (path.json) → sources/data/grandTour.js (puis recompiler)
-node map2.mjs                       # relevé de l'île en course (route, terrain, barrières, obstacles, 0,5 m) → map-a.json
-python3 path_a.py                   # trajet A* porte à porte, en passant par les ouvertures → path.json, tangents_a.json
-python3 render_a.py carte.png       # image de contrôle (barrières, portes, trajet)
-python3 trace_a.py trace.png        # image du mode d’emploi
-node drive.mjs 6 2.2 0.35           # pilote automatique → autopilot-tour.json
+node map2.mjs                       # relevé de l'île aplanie, en course (sol, eau, barrières du circuit, 0,5 m) → map-a.json
+python3 track_b.py waypoints_b.json # piste : A* entre les points de passage, lissage, portes recalées, barrières, contrôles → track_b.json
+python3 render_b.py piste.png       # image de contrôle
+python3 gen_tour_b.py               # → sources/data/grandTour.js (puis recompiler le jeu)
+python3 path_b.py                   # trajet du pilote automatique (circuit + île) → path.json
+node drive.mjs 7 2.6 0.35           # pilote automatique → autopilot-tour.json
 node verify.mjs <movie.json>        # relecture dans une instance neuve → même temps ?
 ```
 
-Les scripts cherchent le jeu compilé dans `../folio-2025/dist` (à côté du dossier BSRace) ; sinon, indiquez-le avec `FOLIO_DIST=…` (et `FOLIO_SRC=…` pour les sources).
+`waypoints_b.json` donne l'ordre et la position approximative des portes ; `TRACK_WIDTH` règle la largeur (12 m). `track_b.py` signale les bords qui croisent une barrière du circuit, les passages de piste trop proches et l'eau profonde. Les scripts cherchent le jeu compilé dans `../folio-2025/dist` (à côté du dossier BSRace) ; sinon, indiquez-le avec `FOLIO_DIST=…` (et `FOLIO_SRC=…` pour les sources).
 
-Attention : modifier les portes ou les ouvertures rend les movies Grand tour existants invalides (pensez à augmenter `TRACKS.tour` dans `TasEditor.js`). La version livrée est celle de `sources/data/grandTour.js`.
+Attention : modifier la piste rend les movies Grand tour existants invalides (pensez à augmenter `TRACKS.tour` dans `TasEditor.js`). La version livrée est celle de `sources/data/grandTour.js`.
 
 ## Licences
 
