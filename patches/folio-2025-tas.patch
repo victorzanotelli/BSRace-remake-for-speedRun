@@ -1173,7 +1173,7 @@ index 0000000..014c051
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..5c9ab04
+index 0000000..c0b6a4a
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
 @@ -0,0 +1,1307 @@
@@ -1196,8 +1196,8 @@ index 0000000..5c9ab04
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
 +const COURSES = { circuit: 'Circuit', tour: 'Grand tour' }
-+// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A avec barrières depuis 1.4.0)
-+const TRACKS = { tour: 2 }
++// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A (1.4.x), 3 = île aplanie et piste à barrières (1.5.0))
++const TRACKS = { tour: 3 }
 +const SETTINGS_KEY = 'bs-tas-settings'
 +const FINE_INTERVAL = 5
 +const FINE_MAX = 12
@@ -2275,7 +2275,7 @@ index 0000000..5c9ab04
 +                }
 +                const oldTrack = TRACKS[course] && (data.track || 1) !== TRACKS[course]
 +                this.loadMovie(movie, oldTrack
-+                    ? `Attention : movie de l'ancien tracé du ${COURSES[course]} (version 1.3.0), il ne suivra pas le nouveau parcours`
++                    ? `Attention : movie d'un ancien tracé du ${COURSES[course]}, il ne suivra pas le parcours actuel`
 +                    : `Movie chargé : ${file.name} (${movie.length} images)`)
 +            }
 +            catch(error) { this.flash(`Erreur : ${error.message}`) }
@@ -2484,6 +2484,35 @@ index 0000000..5c9ab04
 +        this.dom.rows.innerHTML = html
 +    }
 +}
+diff --git a/sources/Game/Terrain.js b/sources/Game/Terrain.js
+index 0ecbd70..335475f 100644
+--- a/sources/Game/Terrain.js
++++ b/sources/Game/Terrain.js
+@@ -85,6 +85,14 @@ export class Terrain
+         this.grassColorUniform = uniform(color('#b8b62e'))
+         this.tracksDelta = uniform(vec2(0))
+ 
++        // Masque d'herbe (Grand tour : pas d'herbe sur la piste de l'île) — 512 × 512 sur les 192 m de l'île
++        this.grassMaskSize = 512
++        this.grassMask = new THREE.DataTexture(new Uint8Array(this.grassMaskSize * this.grassMaskSize * 4), this.grassMaskSize, this.grassMaskSize, THREE.RGBAFormat)
++        this.grassMask.magFilter = THREE.LinearFilter
++        this.grassMask.minFilter = THREE.LinearFilter
++        this.grassMask.needsUpdate = true
++        this.grassMaskStrength = uniform(0)
++
+         const worldPositionToUvNode = Fn(([position]) =>
+         {
+             return position.div(this.subdivision).div(1.5).add(0.5)
+@@ -102,6 +110,9 @@ export class Terrain
+             )
+             data.g.mulAssign(groundDataColor.r.oneMinus())
+ 
++            // Masque d'herbe (piste de l'île)
++            data.g.mulAssign(texture(this.grassMask, textureUv).r.mul(this.grassMaskStrength).oneMinus())
++
+             return data
+         })
+         
 diff --git a/sources/Game/World/Areas/AltarArea.js b/sources/Game/World/Areas/AltarArea.js
 index 3bbb2bb..e38c47f 100644
 --- a/sources/Game/World/Areas/AltarArea.js
@@ -2503,14 +2532,14 @@ index 3bbb2bb..e38c47f 100644
                  gsap.delayedCall(2.2, () =>
                  {
 diff --git a/sources/Game/World/Areas/CircuitArea.js b/sources/Game/World/Areas/CircuitArea.js
-index bb760e6..5230395 100644
+index bb760e6..b046c8a 100644
 --- a/sources/Game/World/Areas/CircuitArea.js
 +++ b/sources/Game/World/Areas/CircuitArea.js
 @@ -10,6 +10,7 @@ import { alea } from 'seedrandom'
  import { InputFlag } from '../../InputFlag.js'
  import { Area } from './Area.js'
  import { timeToRaceString, timeToReadableString } from '../../utilities/time.js'
-+import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY, grandTourGuide } from '../../../data/grandTour.js'
++import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY, grandTourGuide, grandTourIsland } from '../../../data/grandTour.js'
  
  export class CircuitArea extends Area
  {
@@ -2653,7 +2682,7 @@ index bb760e6..5230395 100644
      setResetObjects()
      {
          this.resetObjects = {}
-@@ -564,9 +597,171 @@ export class CircuitArea extends Area
+@@ -564,9 +597,371 @@ export class CircuitArea extends Area
          railsMesh.material.side = THREE.DoubleSide
  
          this.rails.object = railsMesh.userData.object
@@ -2798,6 +2827,199 @@ index bb760e6..5230395 100644
 +                .setCollisionGroups(original.collisionGroups())
 +            this.rails.tourCollider = this.game.physics.world.createCollider(description, body)
 +            this.rails.tourCollider.setEnabled(this.course === 'tour')
++
++            // Piste de l'île : barrières (murs verticaux, du fond de l'eau à 1,1 m) et route (plate, au niveau de la route du circuit)
++            const toLocal = (x, y, z, array) => array.push(x - bodyPosition.x, y - bodyPosition.y, z - bodyPosition.z)
++            {
++                const wallVertices = [], wallIndices = []
++                for(const line of grandTourIsland.barriers)
++                {
++                    const base = wallVertices.length / 3
++                    for(const [ x, z ] of line)
++                    {
++                        toLocal(x, -1.6, z, wallVertices)
++                        toLocal(x, 1.1, z, wallVertices)
++                    }
++                    for(let i = 0; i < line.length - 1; i++)
++                    {
++                        const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3
++                        wallIndices.push(a, c, b, b, c, d)
++                    }
++                }
++                const wallDescription = RAPIER.ColliderDesc.trimesh(new Float32Array(wallVertices), new Uint32Array(wallIndices))
++                    .setDensity(0.1)
++                    .setFriction(original.friction())
++                    .setFrictionCombineRule(original.frictionCombineRule())
++                    .setRestitution(original.restitution())
++                    .setCollisionGroups(original.collisionGroups())
++                this.rails.islandWalls = this.game.physics.world.createCollider(wallDescription, body)
++                this.rails.islandWalls.setEnabled(this.course === 'tour')
++            }
++            {
++                const road = this.roadBody.collider(0)
++                const roadVertices = [], roadIndices = []
++                const left = grandTourIsland.roadLeft, right = grandTourIsland.roadRight
++                for(let i = 0; i < left.length; i++)
++                {
++                    toLocal(left[i][0], 0.02, left[i][1], roadVertices)
++                    toLocal(right[i][0], 0.02, right[i][1], roadVertices)
++                }
++                for(let i = 0; i < left.length - 1; i++)
++                {
++                    const a = i * 2, b = a + 1, c = a + 2, d = a + 3
++                    roadIndices.push(a, c, b, b, c, d)
++                }
++                const roadDescription = RAPIER.ColliderDesc.trimesh(new Float32Array(roadVertices), new Uint32Array(roadIndices))
++                    .setDensity(0.1)
++                    .setFriction(road.friction())
++                    .setFrictionCombineRule(road.frictionCombineRule())
++                    .setRestitution(road.restitution())
++                    .setCollisionGroups(road.collisionGroups())
++                this.rails.islandRoad = this.game.physics.world.createCollider(roadDescription, body)
++                this.rails.islandRoad.setEnabled(this.course === 'tour')
++            }
++        }
++
++        // Piste de l'île (affichage) : route et barrières, enfants de la barrière du circuit (affichées et retirées avec elle)
++        {
++            const island = new THREE.Group()
++            island.visible = false
++
++            // Route : même matériau que la route du circuit
++            const left = grandTourIsland.roadLeft, right = grandTourIsland.roadRight
++            const roadPositions = [], roadNormals = [], roadIndices = []
++            for(let i = 0; i < left.length; i++)
++            {
++                roadPositions.push(left[i][0], 0.04, left[i][1], right[i][0], 0.04, right[i][1])
++                roadNormals.push(0, 1, 0, 0, 1, 0)
++            }
++            for(let i = 0; i < left.length - 1; i++)
++            {
++                const a = i * 2, b = a + 1, c = a + 2, d = a + 3
++                roadIndices.push(a, b, c, b, d, c)
++            }
++            const roadGeometry = new THREE.BufferGeometry()
++            roadGeometry.setAttribute('position', new THREE.Float32BufferAttribute(roadPositions, 3))
++            roadGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(roadNormals, 3))
++            roadGeometry.setIndex(roadIndices)
++            roadGeometry.computeBoundingSphere()
++            const sceneryRoad = this.game.world.scenery?.references?.items.get('road')?.[0]
++            let roadMaterial = sceneryRoad?.material ?? new MeshDefaultMaterial({ colorNode: color('#383039'), hasWater: false })
++            roadMaterial = roadMaterial.clone()
++            roadMaterial.side = THREE.DoubleSide
++            const road = new THREE.Mesh(roadGeometry, roadMaterial)
++            road.receiveShadow = true
++            island.add(road)
++
++            // Vibreurs : bandes rouges et blanches au bord de la route
++            const kerbPositions = [], kerbUvs = [], kerbIndices = []
++            for(const [ outer, inner ] of [ [ grandTourIsland.roadLeft, grandTourIsland.kerbLeft ], [ grandTourIsland.roadRight, grandTourIsland.kerbRight ] ])
++            {
++                const base = kerbPositions.length / 3
++                let along = 0
++                for(let i = 0; i < outer.length; i++)
++                {
++                    if(i > 0) along += Math.hypot(inner[i][0] - inner[i - 1][0], inner[i][1] - inner[i - 1][1])
++                    kerbPositions.push(outer[i][0], 0.06, outer[i][1], inner[i][0], 0.06, inner[i][1])
++                    kerbUvs.push(along / 3, 0, along / 3, 1)
++                }
++                for(let i = 0; i < outer.length - 1; i++)
++                {
++                    const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3
++                    kerbIndices.push(a, b, c, b, d, c)
++                }
++            }
++            const kerbGeometry = new THREE.BufferGeometry()
++            kerbGeometry.setAttribute('position', new THREE.Float32BufferAttribute(kerbPositions, 3))
++            kerbGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(kerbPositions.map((_, i) => i % 3 === 1 ? 1 : 0), 3))
++            kerbGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(kerbUvs, 2))
++            kerbGeometry.setIndex(kerbIndices)
++            kerbGeometry.computeBoundingSphere()
++            const kerbMaterial = new MeshDefaultMaterial({
++                colorNode: mix(color('#d8183c'), color('#f3eee8'), uv().x.fract().step(0.5)),
++                side: THREE.DoubleSide,
++                hasWater: false
++            })
++            const kerbs = new THREE.Mesh(kerbGeometry, kerbMaterial)
++            kerbs.receiveShadow = true
++            island.add(kerbs)
++
++            // Barrières : bandes verticales rouges et blanches (0 à 0,9 m)
++            const wallPositions = [], wallUvs = [], wallIndices = []
++            for(const line of grandTourIsland.barriers)
++            {
++                const base = wallPositions.length / 3
++                let along = 0
++                for(let i = 0; i < line.length; i++)
++                {
++                    if(i > 0) along += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1])
++                    wallPositions.push(line[i][0], 0, line[i][1], line[i][0], 0.9, line[i][1])
++                    wallUvs.push(along / 2, 0, along / 2, 1)
++                }
++                for(let i = 0; i < line.length - 1; i++)
++                {
++                    const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3
++                    wallIndices.push(a, c, b, b, c, d)
++                }
++            }
++            const wallGeometry = new THREE.BufferGeometry()
++            wallGeometry.setAttribute('position', new THREE.Float32BufferAttribute(wallPositions, 3))
++            wallGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(wallUvs, 2))
++            wallGeometry.setIndex(wallIndices)
++            wallGeometry.computeVertexNormals()
++            wallGeometry.computeBoundingSphere()
++            const stripes = uv().x.fract().step(0.5)
++            const wallMaterial = new MeshDefaultMaterial({
++                colorNode: mix(color('#d8183c'), color('#f3eee8'), stripes),
++                side: THREE.DoubleSide,
++                hasWater: false
++            })
++            const walls = new THREE.Mesh(wallGeometry, wallMaterial)
++            walls.castShadow = true
++            walls.receiveShadow = true
++            island.add(walls)
++
++            // Pas d'herbe sur la piste : masque du terrain (activé pendant le Grand tour)
++            {
++                const terrain = this.game.terrain
++                const size = terrain.grassMaskSize, data = terrain.grassMask.image.data
++                const toPixel = (x, z) => [ (x / terrain.size + 0.5) * size, (z / terrain.size + 0.5) * size ]
++                const widen = (a, b, extra) =>
++                {
++                    const dx = a[0] - b[0], dz = a[1] - b[1], length = Math.hypot(dx, dz) || 1
++                    return [ a[0] + dx / length * extra, a[1] + dz / length * extra ]
++                }
++                const inside = (px, pz, quad) =>
++                {
++                    let sign = 0
++                    for(let k = 0; k < 4; k++)
++                    {
++                        const [ ax, az ] = quad[k], [ bx, bz ] = quad[(k + 1) % 4]
++                        const cross = (bx - ax) * (pz - az) - (bz - az) * (px - ax)
++                        if(cross !== 0) { if(sign === 0) sign = Math.sign(cross); else if(Math.sign(cross) !== sign) return false }
++                    }
++                    return true
++                }
++                for(let i = 0; i < left.length - 1; i++)
++                {
++                    const quad = [
++                        toPixel(...widen(left[i], right[i], 0.8)), toPixel(...widen(right[i], left[i], 0.8)),
++                        toPixel(...widen(right[i + 1], left[i + 1], 0.8)), toPixel(...widen(left[i + 1], right[i + 1], 0.8))
++                    ]
++                    const xs = quad.map(q => q[0]), zs = quad.map(q => q[1])
++                    for(let pz = Math.max(0, Math.floor(Math.min(...zs))); pz <= Math.min(size - 1, Math.ceil(Math.max(...zs))); pz++)
++                        for(let px = Math.max(0, Math.floor(Math.min(...xs))); px <= Math.min(size - 1, Math.ceil(Math.max(...xs))); px++)
++                            if(inside(px + 0.5, pz + 0.5, quad))
++                                data[(pz * size + px) * 4] = 255
++                }
++                terrain.grassMask.needsUpdate = true
++            }
++
++            // coordonnées du monde, alors que le groupe est enfant de la barrière du circuit
++            railsMesh.updateWorldMatrix(true, false)
++            island.applyMatrix4(railsMesh.matrixWorld.clone().invert())
++            railsMesh.add(island)
++            this.rails.island = island
 +        }
 +
 +        this.rails.setCourse = (course) =>
@@ -2816,6 +3038,13 @@ index bb760e6..5230395 100644
 +            set(this.rails.collider, !isTour)
 +            if(this.rails.tourCollider)
 +                set(this.rails.tourCollider, isTour)
++            if(this.rails.islandWalls)
++                set(this.rails.islandWalls, isTour)
++            if(this.rails.islandRoad)
++                set(this.rails.islandRoad, isTour)
++            if(this.rails.island)
++                this.rails.island.visible = isTour
++            this.game.terrain.grassMaskStrength.value = isTour ? 1 : 0
 +        }
 +
          this.rails.activate = () =>
@@ -2826,7 +3055,7 @@ index bb760e6..5230395 100644
              this.game.objects.enable(this.rails.object)
          }
          
-@@ -578,11 +773,243 @@ export class CircuitArea extends Area
+@@ -578,11 +973,243 @@ export class CircuitArea extends Area
          this.rails.deactivate()
      }
  
@@ -3073,7 +3302,7 @@ index bb760e6..5230395 100644
              InteractivePoints.ALIGN_RIGHT,
              InteractivePoints.STATE_CONCEALED,
              () =>
-@@ -592,7 +1019,7 @@ export class CircuitArea extends Area
+@@ -592,7 +1219,7 @@ export class CircuitArea extends Area
                  if(sound)
                      sound.play(true)
  
@@ -3082,7 +3311,7 @@ index bb760e6..5230395 100644
              },
              () =>
              {
-@@ -607,6 +1034,18 @@ export class CircuitArea extends Area
+@@ -607,6 +1234,18 @@ export class CircuitArea extends Area
                  this.game.inputs.interactiveButtons.removeItems(['interact'])
              }
          )
@@ -3101,7 +3330,7 @@ index bb760e6..5230395 100644
      }
  
      setStartAnimation()
-@@ -1348,11 +1787,15 @@ export class CircuitArea extends Area
+@@ -1348,11 +1987,15 @@ export class CircuitArea extends Area
          this.menu.inputFlag = new InputFlag(this.menu.inputGroup.querySelector('.js-input-flag'))
      }
  
@@ -3118,7 +3347,7 @@ index bb760e6..5230395 100644
          // Area frustum
          this.frustum.alwaysVisible = true
  
-@@ -1387,13 +1830,19 @@ export class CircuitArea extends Area
+@@ -1387,13 +2030,19 @@ export class CircuitArea extends Area
                  this.startPosition.rotation
              )
  
@@ -3142,19 +3371,26 @@ index bb760e6..5230395 100644
              // Starting lights
              this.startingLights.reset()
  
-@@ -1412,7 +1861,10 @@ export class CircuitArea extends Area
+@@ -1411,8 +2060,17 @@ export class CircuitArea extends Area
+             // Objects
              this.resetObjects.reset()
  
++            // Grand tour : île aplanie (tout ce qui est hors du circuit de base est retiré pendant la course)
++            // (avant les caisses : leur remise en place réactive les objets encore actifs)
++            const flatten = this.game.world.flatten
++            if(isTour) flatten.apply()
++            else flatten.revert()
++
              // Crates (all crates in the world?)
 -            this.game.world.explosiveCrates.reset()
-+            // Grand tour : on retire les caisses explosives à moins de 10 m d'une porte
++            // Grand tour : on retire les caisses hors du circuit de base, et celles à moins de 10 m d'une porte
 +            if(isTour && !this.tourExcludedCrates)
-+                this.tourExcludedCrates = new Set(this.game.world.explosiveCrates.items.filter((crate) => this.courses.tour.some((checkpoint) => Math.hypot(crate.reference.position.x - checkpoint.position.x, crate.reference.position.z - checkpoint.position.z) < 10)))
++                this.tourExcludedCrates = new Set(this.game.world.explosiveCrates.items.filter((crate) => !flatten.keepsPoint(crate.reference.position.x, crate.reference.position.z) || this.courses.tour.some((checkpoint) => Math.hypot(crate.reference.position.x - checkpoint.position.x, crate.reference.position.z - checkpoint.position.z) < 10)))
 +            this.game.world.explosiveCrates.reset(isTour ? this.tourExcludedCrates : null)
  
              // Weather
              this.game.weather.override.start(
-@@ -1438,7 +1890,7 @@ export class CircuitArea extends Area
+@@ -1438,7 +2096,7 @@ export class CircuitArea extends Area
              // Timer
              this.timer.show()
  
@@ -3163,7 +3399,7 @@ index bb760e6..5230395 100644
              this.rails.activate()
  
              // Podium => Hide
-@@ -1525,6 +1977,9 @@ export class CircuitArea extends Area
+@@ -1525,6 +2183,9 @@ export class CircuitArea extends Area
          this.checkpoints.target = null
          this.checkpoints.doorTarget.mesh.visible = false
  
@@ -3173,12 +3409,16 @@ index bb760e6..5230395 100644
          // Sound
          if(!forced)
          {
-@@ -1545,6 +2000,16 @@ export class CircuitArea extends Area
+@@ -1545,6 +2206,20 @@ export class CircuitArea extends Area
                  // Menu buttons
                  this.menu.racingButtons.classList.remove('is-active')
  
 +                // Temps partiels
 +                this.splits.hide()
++
++                // Île remise en état
++                this.game.world.flatten.revert()
++                this.game.terrain.grassMaskStrength.value = 0
 +
 +                // Étiquettes des zones (masquées pendant le Grand tour)
 +                if(this.hidInteractivePoints)
@@ -3190,7 +3430,7 @@ index bb760e6..5230395 100644
                  // Interactive point
                  this.interactivePoint.show()
  
-@@ -1589,7 +2054,7 @@ export class CircuitArea extends Area
+@@ -1589,7 +2264,7 @@ export class CircuitArea extends Area
                  {
                      this.game.achievements.setProgress('circuitFinish', 1)
  
@@ -3199,7 +3439,7 @@ index bb760e6..5230395 100644
                          this.game.achievements.setProgress('circuitFinishFast', 1)
                  }
  
-@@ -1602,8 +2067,8 @@ export class CircuitArea extends Area
+@@ -1602,8 +2277,8 @@ export class CircuitArea extends Area
                      })
                  }
  
@@ -3210,7 +3450,7 @@ index bb760e6..5230395 100644
                  {
                      gsap.delayedCall(1, () =>
                      {
-@@ -1629,6 +2094,9 @@ export class CircuitArea extends Area
+@@ -1629,6 +2304,9 @@ export class CircuitArea extends Area
  
      update()
      {
@@ -3220,7 +3460,7 @@ index bb760e6..5230395 100644
          if(this.state === CircuitArea.STATE_RUNNING)
          {
              // Checkpoints
-@@ -1648,6 +2116,9 @@ export class CircuitArea extends Area
+@@ -1648,6 +2326,9 @@ export class CircuitArea extends Area
                      checkpoint.reach()
              }
  
@@ -3265,32 +3505,319 @@ index d6fd7e3..dda66cf 100644
              this.game.ticker.wait(2, () =>
              {
                  crate.object.physical.body.setEnabled(true)
+diff --git a/sources/Game/World/Flatten.js b/sources/Game/World/Flatten.js
+new file mode 100644
+index 0000000..56aefef
+--- /dev/null
++++ b/sources/Game/World/Flatten.js
+@@ -0,0 +1,265 @@
++import * as THREE from 'three/webgpu'
++import { Game } from '../Game.js'
++
++/**
++ * Île aplanie (Grand tour) : tout ce qui est hors du circuit de base est retiré pendant la course
++ * (arbres, buissons, rochers, bâtiments, zones et leur décor, objets mobiles…) puis remis à la fin.
++ * - zone conservée : la piste du circuit de base (entre ses barrières) et MARGIN mètres de part et d'autre des barrières
++ * - physique : les objets du jeu hors de la zone sont désactivés (objects.disable)
++ * - affichage : les éléments de la scène entièrement hors de la zone sont détachés ; pour les maillages
++ *   « instanciés » (arbres, buissons, fleurs…), seules les instances hors de la zone sont masquées
++ * Le sol, l'eau, l'herbe, le ciel, la voiture, les effets (pluie, confettis…) et le circuit ne sont pas touchés.
++ */
++const MARGIN = 3
++const CELL = 0.5
++
++export class Flatten
++{
++    constructor()
++    {
++        this.game = Game.getInstance()
++        this.applied = false
++        this.mask = null
++    }
++
++    // Grille de la zone conservée : la piste (remplissage depuis la ligne de départ, limité par les barrières)
++    // plus une bande de MARGIN mètres autour des barrières ; table cumulée pour tester un rectangle d'un coup
++    setMask()
++    {
++        const circuit = this.game.world.areas.circuit
++        const half = this.game.terrain.size / 2
++        const n = Math.ceil(this.game.terrain.size / CELL)
++        const keep = new Uint8Array(n * n)
++        const wall = new Uint8Array(n * n)
++        const collider = circuit.rails.collider
++        const v = collider.vertices(), index = collider.indices(), t = collider.translation()
++        const mark = (ax, az, bx, bz, radius, target) =>
++        {
++            const minX = Math.min(ax, bx) - radius, maxX = Math.max(ax, bx) + radius
++            const minZ = Math.min(az, bz) - radius, maxZ = Math.max(az, bz) + radius
++            const dx = bx - ax, dz = bz - az, length2 = dx * dx + dz * dz || 1
++            for(let iz = Math.max(0, Math.floor((minZ + half) / CELL)); iz <= Math.min(n - 1, Math.floor((maxZ + half) / CELL)); iz++)
++                for(let ix = Math.max(0, Math.floor((minX + half) / CELL)); ix <= Math.min(n - 1, Math.floor((maxX + half) / CELL)); ix++)
++                {
++                    const x = -half + (ix + 0.5) * CELL, z = -half + (iz + 0.5) * CELL
++                    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / length2))
++                    const ex = ax + dx * u - x, ez = az + dz * u - z
++                    if(ex * ex + ez * ez <= radius * radius) target[iz * n + ix] = 1
++                }
++        }
++        for(let i = 0; i < index.length; i += 3)
++            for(let k = 0; k < 3; k++)
++            {
++                const a = index[i + k], b = index[i + (k + 1) % 3]
++                const ax = v[a * 3] + t.x, az = v[a * 3 + 2] + t.z, bx = v[b * 3] + t.x, bz = v[b * 3 + 2] + t.z
++                mark(ax, az, bx, bz, CELL * 0.8, wall)
++                mark(ax, az, bx, bz, MARGIN, keep)
++            }
++
++        // piste : remplissage depuis la ligne de départ sans traverser les barrières
++        const start = circuit.checkpoints.items[0].position
++        const track = new Uint8Array(n * n)
++        const queue = [ Math.floor((start.z + half) / CELL) * n + Math.floor((start.x + half) / CELL) ]
++        track[queue[0]] = 1
++        let filled = 0
++        while(queue.length)
++        {
++            const c = queue.pop(); filled++
++            const cx = c % n, cz = (c - cx) / n
++            for(const [ ox, oz ] of [ [ 1, 0 ], [ -1, 0 ], [ 0, 1 ], [ 0, -1 ] ])
++            {
++                const x = cx + ox, z = cz + oz
++                if(x < 0 || z < 0 || x >= n || z >= n) continue
++                const k = z * n + x
++                if(track[k] || wall[k]) continue
++                track[k] = 1
++                queue.push(k)
++            }
++        }
++        // si les barrières ne ferment pas la piste, le remplissage déborde sur l'île : on s'en passe
++        this.trackFilled = filled / (n * n)
++        if(this.trackFilled < 0.5)
++            for(let k = 0; k < n * n; k++) if(track[k]) keep[k] = 1
++        // table cumulée
++        const sum = new Int32Array((n + 1) * (n + 1))
++        for(let iz = 0; iz < n; iz++)
++            for(let ix = 0; ix < n; ix++)
++                sum[(iz + 1) * (n + 1) + ix + 1] = keep[iz * n + ix] + sum[iz * (n + 1) + ix + 1] + sum[(iz + 1) * (n + 1) + ix] - sum[iz * (n + 1) + ix]
++        this.mask = { n, half, keep, sum }
++    }
++
++    keepsPoint(x, z)
++    {
++        const { n, half, keep } = this.mask
++        const ix = Math.floor((x + half) / CELL), iz = Math.floor((z + half) / CELL)
++        if(ix < 0 || iz < 0 || ix >= n || iz >= n) return false
++        return keep[iz * n + ix] === 1
++    }
++
++    // Le rectangle (au sol) touche-t-il la zone conservée ?
++    touchesBox(minX, minZ, maxX, maxZ)
++    {
++        const { n, half, sum } = this.mask
++        const x0 = Math.max(0, Math.floor((minX + half) / CELL)), z0 = Math.max(0, Math.floor((minZ + half) / CELL))
++        const x1 = Math.min(n - 1, Math.floor((maxX + half) / CELL)), z1 = Math.min(n - 1, Math.floor((maxZ + half) / CELL))
++        if(x1 < x0 || z1 < z0) return false
++        const w = n + 1
++        return sum[(z1 + 1) * w + x1 + 1] - sum[z0 * w + x1 + 1] - sum[(z1 + 1) * w + x0] + sum[z0 * w + x0] > 0
++    }
++
++    // Éléments à ne jamais toucher (sol, eau, herbe, effets, voiture, circuit…)
++    collectExcluded()
++    {
++        const excluded = new Set()
++        const add = (value, depth) =>
++        {
++            if(!value || typeof value !== 'object' || depth < 0) return
++            if(value.isObject3D) { excluded.add(value); return }
++            if(Array.isArray(value)) { for(const item of value) add(item, depth - 1); return }
++            if(value instanceof Map) { for(const item of value.values()) add(item, depth - 1); return }
++            if(Object.getPrototypeOf(value) !== Object.prototype && depth < 3) return
++            for(const key of Object.keys(value)) if(key !== 'game') add(value[key], depth - 1)
++        }
++        const world = this.game.world
++        for(const key of [ 'visualVehicle', 'floor', 'waterSurface', 'grass', 'windLines', 'confetti', 'leaves', 'rain', 'lightnings', 'fireballs', 'snow', 'visualTornado', 'grid', 'intro' ])
++            add(world[key], 4)
++        add(this.game.world.scenery?.road, 3)
++        const circuit = world.areas.circuit
++        add(circuit.model, 1)
++        add(circuit.checkpoints, 3)
++        add(circuit.guide, 2)
++        add(circuit.rails, 2)
++        return excluded
++    }
++
++    // Maillages instanciés dont les matrices sont dans un attribut à part (Foliage, Flowers…)
++    collectCustomInstanceMatrices()
++    {
++        const map = new Map()
++        const seen = new Set()
++        const scan = (value, depth) =>
++        {
++            if(!value || typeof value !== 'object' || depth < 0 || seen.has(value) || value.isObject3D) return
++            seen.add(value)
++            if(value.mesh?.isInstancedMesh && value.instanceMatrix?.isInstancedBufferAttribute && value.instanceMatrix !== value.mesh.instanceMatrix && value.instanceMatrix.itemSize === 16)
++                map.set(value.mesh, value.instanceMatrix)
++            if(Array.isArray(value)) { for(const item of value) scan(item, depth - 1); return }
++            if(Object.getPrototypeOf(value) !== Object.prototype && depth < 2) return
++            for(const key of Object.keys(value)) if(key !== 'game') scan(value[key], depth - 1)
++        }
++        scan(this.game.world, 4)
++        return map
++    }
++
++    apply()
++    {
++        if(this.applied) return
++        this.applied = true
++        if(!this.mask) this.setMask()
++
++        const objects = this.game.objects
++        const circuit = this.game.world.areas.circuit
++        const keepBodies = new Set([
++            this.game.world.floor?.physical?.body?.handle,
++            this.game.world.floor?.bedRock?.physical?.body?.handle,
++            circuit.roadBody?.handle,
++            circuit.rails?.object?.physical?.body?.handle,
++            this.game.physicalVehicle?.chassis?.physical?.body?.handle
++        ])
++        const crates = new Set(this.game.world.explosiveCrates?.items.map(crate => crate.object) || [])
++
++        const excluded = this.collectExcluded()
++        const isExcluded = (node) => { for(let n = node; n; n = n.parent) if(excluded.has(n)) return true; return false }
++
++        // 1. Objets du jeu (physique + affichage)
++        this.disabledObjects = []
++        const box = new THREE.Box3()
++        objects.list.forEach((object) =>
++        {
++            if(!object.physical || crates.has(object)) return
++            const body = object.physical.body
++            if(keepBodies.has(body.handle) || !body.isEnabled() || (object.visual?.object3D && isExcluded(object.visual.object3D))) return
++            let touches
++            if(object.visual?.object3D)
++            {
++                box.setFromObject(object.visual.object3D)
++                touches = box.isEmpty() ? this.keepsPoint(body.translation().x, body.translation().z) : this.touchesBox(box.min.x, box.min.z, box.max.x, box.max.z)
++            }
++            else
++                touches = this.keepsPoint(body.translation().x, body.translation().z)
++            if(touches) return
++            objects.disable(object)
++            this.disabledObjects.push(object)
++        })
++
++        // 2. Affichage : décor hors de la zone
++        const customMatrices = this.collectCustomInstanceMatrices()
++        this.detached = []
++        this.hiddenInstances = []
++        const zero = new THREE.Matrix4().makeScale(0, 0, 0)
++        const matrix = new THREE.Matrix4(), position = new THREE.Vector3()
++        const visit = (node) =>
++        {
++            if(excluded.has(node)) return
++            box.setFromObject(node)
++            if(box.isEmpty())
++            {
++                for(const child of [ ...node.children ]) visit(child)
++                return
++            }
++            const huge = box.max.x - box.min.x > 150 || box.max.z - box.min.z > 150
++            if(!huge && !this.touchesBox(box.min.x, box.min.z, box.max.x, box.max.z))
++            {
++                // les zones lisent geometry.boundingSphere quand elles reviennent dans le champ ; il n'est calculé qu'au
++                // premier rendu, qui n'a peut-être jamais eu lieu (Grand tour lancé avant d'avoir vu la zone)
++                node.traverse((child) => { if(child.geometry && !child.geometry.boundingSphere) child.geometry.computeBoundingSphere() })
++                this.detached.push({ node, parent: node.parent })
++                node.removeFromParent()
++                return
++            }
++            if(node.isInstancedMesh)
++            {
++                node.updateMatrixWorld()
++                // feuillages et fleurs : matrices dans un attribut à eux (lu par leur shader)
++                const attribute = customMatrices.get(node) || node.instanceMatrix
++                const hidden = []
++                for(let i = 0; i < node.count; i++)
++                {
++                    matrix.fromArray(attribute.array, i * 16)
++                    position.setFromMatrixPosition(matrix).applyMatrix4(node.matrixWorld)
++                    if(!this.keepsPoint(position.x, position.z))
++                    {
++                        hidden.push([ i, matrix.clone() ])
++                        zero.toArray(attribute.array, i * 16)
++                    }
++                }
++                if(hidden.length)
++                {
++                    attribute.needsUpdate = true
++                    this.hiddenInstances.push({ node, attribute, hidden })
++                }
++                return
++            }
++            for(const child of [ ...node.children ]) visit(child)
++        }
++        for(const child of [ ...this.game.scene.children ]) visit(child)
++    }
++
++    revert()
++    {
++        if(!this.applied) return
++        this.applied = false
++        for(const { attribute, hidden } of this.hiddenInstances.reverse())
++        {
++            for(const [ i, matrix ] of hidden) matrix.toArray(attribute.array, i * 16)
++            attribute.needsUpdate = true
++        }
++        for(const { node, parent } of this.detached.reverse())
++            if(parent && !node.parent) parent.add(node)
++        for(const object of this.disabledObjects.reverse())
++            this.game.objects.enable(object)
++        this.hiddenInstances = []
++        this.detached = []
++        this.disabledObjects = []
++    }
++}
+diff --git a/sources/Game/World/World.js b/sources/Game/World/World.js
+index ae36e16..c28f54d 100644
+--- a/sources/Game/World/World.js
++++ b/sources/Game/World/World.js
+@@ -1,3 +1,4 @@
++import { Flatten } from './Flatten.js'
+ import * as THREE from 'three/webgpu'
+ import { Game } from '../Game.js'
+ import { Floor } from './Floor.js'
+@@ -78,6 +79,7 @@ export class World
+             this.lanterns = new Lanterns()
+             this.scenery = new Scenery()
+             this.areas = new Areas()
++            this.flatten = new Flatten() // Grand tour : île aplanie pendant la course
+         }
+         else if(step === 2)
+         {
 diff --git a/sources/data/grandTour.js b/sources/data/grandTour.js
 new file mode 100644
-index 0000000..3997617
+index 0000000..142fb0d
 --- /dev/null
 +++ b/sources/data/grandTour.js
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,49 @@
 +/**
-+ * Grand tour (tracé A) : un tour complet du circuit avec ses barrières (portes 0 à 7),
-+ * sortie par une ouverture juste après la porte 7, une porte par zone de l'île,
-+ * retour sur le circuit par une seconde ouverture, arrivée sur la ligne de départ (porte 0).
-+ * Positions calculées sur une carte praticable de l'île (sol, eau, obstacles) relevée dans le moteur physique.
-+ * rotation : même convention que les portes du circuit (le segment de la porte est perpendiculaire au sens de la course)
-+ * halfWidth : demi-largeur de la porte
++ * Grand tour (tracé B, depuis 1.5.0) : un tour complet du circuit avec ses barrières (portes 0 à 7),
++ * sortie par une ouverture juste après la porte 7, puis une piste de l'île bordée de barrières
++ * qui passe par une porte par zone, retour sur le circuit par une seconde ouverture, arrivée sur la porte 0.
++ * Pendant la course, l'île est aplanie (World/Flatten.js). Données calculées par tools/grand-tour/track_b.py.
++ * rotation : même convention que les portes du circuit ; halfWidth : demi-largeur de la porte
 + */
 +export const grandTourGates = [
-+    { name: 'bowling', label: 'Bowling', x: 1.5, z: 68.5, rotation: -2.0525, halfWidth: 5.2 },
-+    { name: 'landing', label: 'Accueil', x: 43.5, z: 48.5, rotation: -1.3654, halfWidth: 5.2 },
-+    { name: 'toilet', label: 'Toilettes', x: 62.0, z: 61.5, rotation: -1.9333, halfWidth: 4.0 },
-+    { name: 'achievements', label: 'Succès', x: 69.5, z: 19.5, rotation: -0.0435, halfWidth: 5.0 },
-+    { name: 'altar', label: 'Autel', x: 66.3, z: -27.9, rotation: -3.1416, halfWidth: 4.0 },
-+    { name: 'behindTheScene', label: 'Coulisses', x: 47.5, z: -15.5, rotation: 1.9513, halfWidth: 5.0 },
-+    { name: 'social', label: 'Social', x: 33.5, z: -27.5, rotation: 2.6079, halfWidth: 5.0 },
-+    { name: 'career', label: 'Carrière', x: 25.5, z: -0.5, rotation: 2.8243, halfWidth: 6.0 },
-+    { name: 'projects', label: 'Projets', x: 28.5, z: 18.5, rotation: 1.9040, halfWidth: 5.2 },
-+    { name: 'lab', label: 'Labo', x: 14.5, z: 22.5, rotation: 1.7993, halfWidth: 5.2 },
-+    { name: 'cookie', label: 'Cookie', x: 3.5, z: 33.5, rotation: 2.0344, halfWidth: 5.4 },
++    { name: 'bowling', label: 'Bowling', x: 1.13, z: 66.7, rotation: -1.3598, halfWidth: 6.0 },
++    { name: 'landing', label: 'Accueil', x: 42.65, z: 52.97, rotation: -1.6324, halfWidth: 6.0 },
++    { name: 'toilet', label: 'Toilettes', x: 61.9, z: 61.27, rotation: -1.1304, halfWidth: 6.0 },
++    { name: 'achievements', label: 'Succès', x: 70.1, z: 19.06, rotation: 0.4207, halfWidth: 6.0 },
++    { name: 'altar', label: 'Autel', x: 60.58, z: -5.03, rotation: 0.6055, halfWidth: 6.0 },
++    { name: 'behindTheScene', label: 'Coulisses', x: 47.73, z: -16.0, rotation: 0.924, halfWidth: 6.0 },
++    { name: 'social', label: 'Social', x: 35.14, z: -22.82, rotation: 1.9963, halfWidth: 6.0 },
++    { name: 'career', label: 'Carrière', x: 26.91, z: 0.13, rotation: 3.0491, halfWidth: 6.0 },
++    { name: 'projects', label: 'Projets', x: 26.04, z: 16.91, rotation: 2.6288, halfWidth: 6.0 },
++    { name: 'lab', label: 'Labo', x: 15.13, z: 23.52, rotation: 2.1321, halfWidth: 6.0 },
++    { name: 'cookie', label: 'Cookie', x: 3.52, z: 32.98, rotation: 2.1232, halfWidth: 6.0 },
 +]
 +
 +// Ouvertures dans les barrières du circuit (les triangles des barrières à moins de radius mètres sont retirés)
@@ -3302,11 +3829,24 @@ index 0000000..3997617
 +// Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
 +export const grandTourOutOfBoundsY = -1.0
 +
-+// Guidage : trajet praticable porte à porte (flèche au sol), calculé sur la carte de l'île (tools/grand-tour/path_a.py)
++// Piste de l'île : bords de la route (left/right, même nombre de points) et barrières (polylignes)
++export const grandTourIsland = {
++    width: 12.0,
++    roadLeft: [ [-32.20, 72.52], [-31.20, 72.59], [-30.20, 72.66], [-29.20, 72.74], [-28.21, 72.81], [-27.21, 72.89], [-26.21, 72.96], [-25.22, 73.03], [-24.22, 73.11], [-23.22, 73.18], [-22.22, 73.25], [-21.23, 73.33], [-20.23, 73.40], [-19.23, 73.48], [-18.23, 73.55], [-17.24, 73.62], [-16.24, 73.70], [-15.24, 73.77], [-14.25, 73.85], [-13.25, 73.92], [-12.25, 73.99], [-11.15, 74.07], [-9.97, 74.12], [-8.80, 74.14], [-7.63, 74.13], [-6.47, 74.08], [-5.32, 74.01], [-4.19, 73.91], [-3.06, 73.79], [-1.94, 73.64], [-0.83, 73.48], [0.28, 73.29], [1.37, 73.09], [2.45, 72.86], [3.52, 72.62], [4.59, 72.37], [5.64, 72.10], [6.69, 71.82], [7.73, 71.52], [8.76, 71.21], [9.79, 70.89], [10.82, 70.56], [11.83, 70.22], [12.83, 69.87], [13.83, 69.51], [14.83, 69.14], [15.82, 68.76], [16.80, 68.37], [17.78, 67.98], [18.75, 67.58], [19.72, 67.17], [20.69, 66.75], [21.64, 66.33], [22.59, 65.90], [23.55, 65.46], [24.49, 65.02], [25.42, 64.58], [26.31, 64.15], [27.16, 63.75], [28.02, 63.36], [28.88, 62.97], [29.72, 62.61], [30.57, 62.25], [31.43, 61.90], [32.29, 61.57], [33.14, 61.25], [33.98, 60.95], [34.81, 60.67], [35.65, 60.40], [36.47, 60.16], [37.29, 59.94], [38.10, 59.74], [38.88, 59.58], [39.64, 59.44], [40.37, 59.35], [41.07, 59.28], [41.73, 59.25], [42.30, 59.26], [42.81, 59.31], [43.22, 59.38], [43.50, 59.46], [43.69, 59.53], [43.80, 59.59], [43.85, 59.64], [43.97, 59.77], [44.39, 60.36], [45.10, 61.29], [45.87, 62.22], [46.68, 63.15], [47.58, 64.08], [48.57, 65.01], [49.68, 65.94], [50.98, 66.85], [52.52, 67.70], [54.39, 68.42], [56.61, 68.83], [58.88, 68.78], [60.67, 68.41], [62.06, 67.99], [63.37, 67.51], [64.60, 66.96], [65.77, 66.37], [66.87, 65.74], [67.93, 65.08], [68.94, 64.41], [69.90, 63.71], [70.96, 62.90], [72.18, 61.79], [73.32, 60.48], [74.23, 59.17], [74.97, 57.89], [75.59, 56.63], [76.10, 55.41], [76.54, 54.21], [76.92, 53.02], [77.24, 51.87], [77.52, 50.72], [77.77, 49.59], [77.99, 48.48], [78.18, 47.37], [78.35, 46.27], [78.50, 45.18], [78.64, 44.10], [78.76, 43.02], [78.86, 41.95], [78.95, 40.88], [79.03, 39.82], [79.09, 38.78], [79.15, 37.75], [79.21, 36.72], [79.26, 35.68], [79.30, 34.63], [79.34, 33.58], [79.36, 32.52], [79.38, 31.45], [79.38, 30.37], [79.37, 29.28], [79.34, 28.16], [79.29, 27.02], [79.20, 25.84], [79.07, 24.59], [78.85, 23.23], [78.47, 21.62], [77.65, 19.55], [76.74, 18.19], [76.44, 17.72], [76.18, 17.21], [75.87, 16.52], [75.54, 15.76], [75.22, 14.94], [74.90, 14.09], [74.59, 13.23], [74.28, 12.34], [73.98, 11.45], [73.68, 10.54], [73.39, 9.63], [73.10, 8.71], [72.81, 7.78], [72.53, 6.85], [72.25, 5.92], [71.96, 4.94], [71.64, 3.90], [71.30, 2.84], [70.93, 1.79], [70.55, 0.74], [70.13, -0.32], [69.70, -1.37], [69.24, -2.42], [68.74, -3.47], [68.22, -4.51], [67.66, -5.55], [67.07, -6.58], [66.43, -7.60], [65.76, -8.62], [65.04, -9.61], [64.28, -10.60], [63.46, -11.57], [62.60, -12.50], [61.68, -13.42], [60.71, -14.30], [59.68, -15.13], [58.68, -15.86], [57.80, -16.47], [57.01, -17.03], [56.22, -17.59], [55.43, -18.15], [54.64, -18.72], [53.86, -19.29], [53.08, -19.87], [52.30, -20.45], [51.52, -21.03], [50.75, -21.62], [49.98, -22.21], [49.21, -22.80], [48.45, -23.40], [47.69, -24.00], [46.93, -24.60], [46.17, -25.21], [45.41, -25.82], [44.52, -26.55], [43.30, -27.44], [41.74, -28.33], [39.79, -29.09], [37.44, -29.50], [34.85, -29.32], [32.43, -28.50], [30.48, -27.30], [29.00, -25.96], [27.90, -24.65], [27.02, -23.37], [26.31, -22.13], [25.71, -20.95], [25.20, -19.79], [24.75, -18.65], [24.34, -17.53], [23.98, -16.43], [23.66, -15.36], [23.36, -14.33], [23.07, -13.30], [22.80, -12.27], [22.53, -11.23], [22.28, -10.19], [22.04, -9.14], [21.81, -8.08], [21.59, -7.01], [21.39, -5.94], [21.21, -4.86], [21.04, -3.77], [20.88, -2.68], [20.75, -1.57], [20.64, -0.46], [20.54, 0.66], [20.47, 1.79], [20.42, 2.93], [20.40, 4.09], [20.41, 5.24], [20.45, 6.42], [20.52, 7.59], [20.63, 8.78], [20.76, 9.83], [20.85, 10.64], [20.89, 11.31], [20.89, 11.94], [20.86, 12.50], [20.80, 12.98], [20.71, 13.37], [20.62, 13.65], [20.53, 13.85], [20.45, 13.98], [20.38, 14.07], [20.26, 14.16], [20.09, 14.27], [19.83, 14.40], [19.26, 14.61], [18.28, 14.96], [17.14, 15.41], [16.03, 15.89], [14.94, 16.41], [13.86, 16.97], [12.80, 17.56], [11.77, 18.19], [10.76, 18.85], [9.78, 19.53], [8.83, 20.25], [7.89, 20.99], [6.99, 21.75], [6.11, 22.53], [5.27, 23.33], [4.54, 24.05], [3.90, 24.67], [3.27, 25.25], [2.64, 25.80], [2.02, 26.31], [1.40, 26.80], [0.79, 27.23], [0.19, 27.63], [-0.38, 27.96], [-0.91, 28.23], [-1.39, 28.44], [-1.84, 28.59], [-2.54, 28.76], [-3.49, 28.98], [-4.46, 29.21], [-5.43, 29.44], [-6.19, 29.62], [-7.17, 29.85], [-8.14, 30.08], [-9.11, 30.30], [-10.09, 30.53], [-11.06, 30.76], [-12.03, 30.99], [-13.01, 31.22] ],
++    roadRight: [ [-31.27, 59.95], [-30.27, 60.02], [-29.27, 60.10], [-28.27, 60.17], [-27.28, 60.25], [-26.28, 60.32], [-25.28, 60.39], [-24.28, 60.47], [-23.29, 60.54], [-22.29, 60.61], [-21.29, 60.69], [-20.30, 60.76], [-19.30, 60.84], [-18.30, 60.91], [-17.30, 60.98], [-16.31, 61.06], [-15.31, 61.13], [-14.31, 61.21], [-13.31, 61.28], [-12.32, 61.35], [-11.32, 61.43], [-10.42, 61.49], [-9.61, 61.53], [-8.78, 61.54], [-7.95, 61.53], [-7.11, 61.50], [-6.26, 61.45], [-5.41, 61.37], [-4.55, 61.28], [-3.68, 61.17], [-2.82, 61.04], [-1.95, 60.89], [-1.07, 60.72], [-0.20, 60.54], [0.68, 60.35], [1.56, 60.14], [2.45, 59.91], [3.33, 59.67], [4.21, 59.42], [5.10, 59.16], [5.97, 58.89], [6.85, 58.60], [7.74, 58.30], [8.62, 57.99], [9.50, 57.67], [10.38, 57.35], [11.26, 57.01], [12.13, 56.67], [13.02, 56.31], [13.89, 55.95], [14.76, 55.58], [15.63, 55.21], [16.51, 54.82], [17.38, 54.43], [18.25, 54.03], [19.11, 53.62], [19.99, 53.21], [20.90, 52.77], [21.87, 52.32], [22.82, 51.88], [23.79, 51.45], [24.78, 51.02], [25.77, 50.60], [26.77, 50.20], [27.78, 49.80], [28.80, 49.42], [29.84, 49.05], [30.90, 48.69], [31.97, 48.35], [33.06, 48.03], [34.18, 47.73], [35.32, 47.45], [36.49, 47.21], [37.70, 46.99], [38.95, 46.83], [40.24, 46.71], [41.58, 46.65], [43.01, 46.68], [44.49, 46.82], [46.05, 47.10], [47.69, 47.57], [49.34, 48.27], [50.96, 49.22], [52.46, 50.43], [53.70, 51.76], [54.46, 52.79], [54.96, 53.44], [55.47, 54.06], [55.97, 54.63], [56.46, 55.14], [56.93, 55.59], [57.35, 55.94], [57.69, 56.18], [57.89, 56.30], [57.89, 56.31], [57.63, 56.28], [57.34, 56.27], [57.51, 56.21], [58.04, 56.05], [58.60, 55.84], [59.19, 55.58], [59.81, 55.26], [60.44, 54.91], [61.09, 54.50], [61.74, 54.07], [62.39, 53.59], [62.93, 53.19], [63.19, 52.96], [63.36, 52.76], [63.59, 52.43], [63.85, 51.98], [64.11, 51.44], [64.37, 50.82], [64.61, 50.14], [64.84, 49.42], [65.06, 48.65], [65.26, 47.85], [65.43, 47.03], [65.60, 46.18], [65.75, 45.32], [65.89, 44.44], [66.01, 43.55], [66.12, 42.65], [66.22, 41.74], [66.31, 40.82], [66.39, 39.89], [66.46, 38.96], [66.52, 38.00], [66.58, 37.04], [66.63, 36.07], [66.67, 35.12], [66.71, 34.16], [66.74, 33.22], [66.77, 32.27], [66.78, 31.34], [66.78, 30.42], [66.77, 29.52], [66.75, 28.63], [66.71, 27.78], [66.65, 26.97], [66.57, 26.22], [66.48, 25.61], [66.41, 25.27], [66.53, 25.48], [66.28, 25.21], [65.51, 23.99], [64.85, 22.73], [64.33, 21.60], [63.88, 20.52], [63.47, 19.48], [63.08, 18.45], [62.71, 17.44], [62.36, 16.43], [62.03, 15.43], [61.70, 14.44], [61.38, 13.45], [61.07, 12.46], [60.77, 11.48], [60.47, 10.49], [60.17, 9.51], [59.90, 8.57], [59.63, 7.70], [59.35, 6.86], [59.06, 6.02], [58.76, 5.19], [58.45, 4.39], [58.11, 3.59], [57.77, 2.81], [57.41, 2.05], [57.04, 1.30], [56.65, 0.58], [56.25, -0.12], [55.83, -0.80], [55.39, -1.45], [54.94, -2.08], [54.48, -2.67], [54.01, -3.23], [53.52, -3.77], [53.02, -4.27], [52.51, -4.73], [51.98, -5.16], [51.37, -5.60], [50.60, -6.13], [49.76, -6.72], [48.92, -7.32], [48.08, -7.92], [47.24, -8.52], [46.41, -9.13], [45.58, -9.74], [44.75, -10.36], [43.93, -10.97], [43.11, -11.60], [42.29, -12.22], [41.48, -12.85], [40.67, -13.49], [39.86, -14.12], [39.06, -14.76], [38.25, -15.41], [37.46, -16.06], [36.80, -16.59], [36.41, -16.89], [36.24, -17.00], [36.33, -16.98], [36.73, -16.92], [37.33, -16.97], [37.86, -17.14], [38.12, -17.28], [38.12, -17.27], [37.95, -17.05], [37.70, -16.68], [37.41, -16.18], [37.11, -15.58], [36.82, -14.91], [36.53, -14.19], [36.26, -13.43], [35.99, -12.62], [35.74, -11.78], [35.48, -10.89], [35.23, -9.99], [34.99, -9.09], [34.76, -8.19], [34.54, -7.29], [34.34, -6.39], [34.14, -5.50], [33.96, -4.60], [33.79, -3.71], [33.64, -2.82], [33.50, -1.93], [33.38, -1.04], [33.27, -0.16], [33.18, 0.71], [33.11, 1.58], [33.05, 2.45], [33.02, 3.31], [33.00, 4.15], [33.01, 5.00], [33.04, 5.82], [33.09, 6.65], [33.16, 7.45], [33.27, 8.38], [33.40, 9.56], [33.48, 10.88], [33.49, 12.26], [33.41, 13.69], [33.20, 15.19], [32.85, 16.75], [32.31, 18.36], [31.54, 19.98], [30.54, 21.53], [29.31, 22.95], [27.92, 24.17], [26.43, 25.17], [24.90, 25.94], [23.60, 26.44], [22.70, 26.76], [21.97, 27.04], [21.26, 27.36], [20.54, 27.69], [19.85, 28.06], [19.16, 28.44], [18.48, 28.85], [17.81, 29.29], [17.15, 29.75], [16.51, 30.23], [15.87, 30.74], [15.25, 31.26], [14.64, 31.81], [14.02, 32.39], [13.33, 33.07], [12.54, 33.84], [11.69, 34.62], [10.81, 35.39], [9.90, 36.15], [8.94, 36.89], [7.92, 37.62], [6.85, 38.32], [5.69, 39.00], [4.44, 39.64], [3.09, 40.22], [1.64, 40.70], [0.40, 41.01], [-0.60, 41.25], [-1.57, 41.47], [-2.55, 41.70], [-3.31, 41.88], [-4.28, 42.11], [-5.25, 42.34], [-6.23, 42.57], [-7.20, 42.80], [-8.17, 43.03], [-9.15, 43.26], [-10.12, 43.49] ],
++    kerbLeft: [ [-32.20, 72.52], [-31.20, 72.59], [-30.20, 72.66], [-29.20, 72.74], [-28.21, 72.81], [-27.21, 72.89], [-26.21, 72.96], [-25.10, 71.54], [-24.11, 71.61], [-23.11, 71.68], [-22.11, 71.76], [-21.12, 71.83], [-20.12, 71.91], [-19.12, 71.98], [-18.12, 72.05], [-17.13, 72.13], [-16.13, 72.20], [-15.13, 72.28], [-14.13, 72.35], [-13.14, 72.42], [-12.14, 72.50], [-11.07, 72.58], [-9.93, 72.62], [-8.80, 72.64], [-7.67, 72.63], [-6.55, 72.58], [-5.44, 72.52], [-4.33, 72.42], [-3.23, 72.30], [-2.14, 72.16], [-1.06, 72.00], [0.01, 71.81], [1.08, 71.61], [2.13, 71.40], [3.18, 71.16], [4.23, 70.91], [5.26, 70.65], [6.29, 70.37], [7.31, 70.08], [8.33, 69.78], [9.34, 69.46], [10.35, 69.14], [11.34, 68.80], [12.33, 68.45], [13.32, 68.10], [14.30, 67.74], [15.28, 67.36], [16.25, 66.98], [17.21, 66.59], [18.17, 66.19], [19.13, 65.79], [20.08, 65.37], [21.03, 64.96], [21.97, 64.53], [22.91, 64.10], [23.85, 63.66], [24.78, 63.22], [25.66, 62.79], [26.53, 62.39], [27.40, 61.99], [28.27, 61.60], [29.13, 61.23], [30.00, 60.86], [30.88, 60.51], [31.75, 60.17], [32.62, 59.84], [33.48, 59.53], [34.35, 59.24], [35.21, 58.97], [36.07, 58.71], [36.92, 58.49], [37.77, 58.28], [38.60, 58.10], [39.41, 57.96], [40.20, 57.85], [40.97, 57.78], [41.71, 57.75], [42.38, 57.76], [43.01, 57.82], [43.56, 57.92], [44.00, 58.04], [44.36, 58.19], [44.65, 58.36], [44.88, 58.54], [45.13, 58.82], [45.59, 59.46], [46.28, 60.36], [47.01, 61.25], [47.79, 62.13], [48.64, 63.02], [49.56, 63.89], [50.59, 64.75], [51.78, 65.58], [53.16, 66.35], [54.80, 66.98], [56.73, 67.34], [58.70, 67.29], [60.29, 66.96], [61.58, 66.57], [62.80, 66.12], [63.96, 65.60], [65.06, 65.05], [66.11, 64.45], [67.11, 63.83], [68.08, 63.18], [69.01, 62.51], [70.00, 61.74], [71.11, 60.74], [72.14, 59.56], [72.97, 58.37], [73.65, 57.19], [74.22, 56.01], [74.70, 54.86], [75.12, 53.72], [75.48, 52.59], [75.79, 51.48], [76.06, 50.38], [76.30, 49.29], [76.52, 48.21], [76.70, 47.13], [76.87, 46.05], [77.02, 44.99], [77.15, 43.93], [77.26, 42.87], [77.37, 41.81], [77.45, 40.76], [77.53, 39.72], [77.60, 38.69], [77.66, 37.67], [77.71, 36.64], [77.76, 35.61], [77.80, 34.58], [77.84, 33.54], [77.86, 32.49], [77.88, 31.44], [77.88, 30.38], [77.87, 29.31], [77.84, 28.22], [77.79, 27.11], [77.71, 25.97], [77.58, 24.79], [77.38, 23.51], [77.04, 22.05], [76.32, 20.25], [75.50, 19.03], [75.14, 18.47], [74.83, 17.86], [74.49, 17.13], [74.16, 16.32], [73.82, 15.48], [73.50, 14.61], [73.18, 13.73], [72.86, 12.83], [72.56, 11.92], [72.25, 11.00], [71.96, 10.08], [71.67, 9.15], [71.38, 8.22], [71.09, 7.29], [70.81, 6.35], [70.52, 5.37], [70.21, 4.35], [69.87, 3.32], [69.52, 2.29], [69.14, 1.27], [68.74, 0.24], [68.32, -0.78], [67.87, -1.80], [67.39, -2.81], [66.89, -3.82], [66.35, -4.82], [65.78, -5.81], [65.17, -6.79], [64.52, -7.76], [63.84, -8.72], [63.11, -9.66], [62.33, -10.58], [61.52, -11.46], [60.65, -12.33], [59.73, -13.16], [58.76, -13.94], [57.81, -14.64], [56.95, -15.24], [56.15, -15.80], [55.35, -16.37], [54.55, -16.93], [53.76, -17.51], [52.97, -18.08], [52.19, -18.66], [51.40, -19.24], [50.62, -19.83], [49.84, -20.42], [49.07, -21.02], [48.29, -21.62], [47.52, -22.22], [46.75, -22.82], [45.99, -23.43], [45.23, -24.04], [44.47, -24.66], [43.60, -25.37], [42.48, -26.18], [41.09, -26.98], [39.38, -27.65], [37.35, -28.00], [35.14, -27.85], [33.07, -27.15], [31.39, -26.11], [30.09, -24.93], [29.09, -23.74], [28.29, -22.57], [27.63, -21.42], [27.07, -20.31], [26.58, -19.21], [26.15, -18.12], [25.76, -17.04], [25.41, -15.98], [25.10, -14.94], [24.80, -13.92], [24.52, -12.91], [24.25, -11.89], [23.99, -10.87], [23.74, -9.84], [23.50, -8.81], [23.28, -7.77], [23.07, -6.72], [22.87, -5.68], [22.69, -4.62], [22.52, -3.55], [22.37, -2.48], [22.24, -1.40], [22.13, -0.32], [22.04, 0.77], [21.97, 1.87], [21.92, 2.98], [21.90, 4.09], [21.91, 5.21], [21.95, 6.35], [22.02, 7.48], [22.12, 8.62], [22.25, 9.66], [22.34, 10.51], [22.39, 11.26], [22.39, 11.98], [22.36, 12.64], [22.28, 13.24], [22.16, 13.77], [22.01, 14.21], [21.84, 14.58], [21.65, 14.88], [21.44, 15.12], [21.17, 15.35], [20.85, 15.57], [20.44, 15.77], [19.78, 16.02], [18.81, 16.36], [17.72, 16.79], [16.65, 17.26], [15.60, 17.76], [14.57, 18.29], [13.56, 18.86], [12.57, 19.46], [11.60, 20.09], [10.66, 20.75], [9.74, 21.43], [8.84, 22.15], [7.97, 22.88], [7.13, 23.64], [6.31, 24.41], [5.58, 25.13], [4.92, 25.76], [4.27, 26.36], [3.62, 26.94], [2.96, 27.48], [2.30, 28.00], [1.64, 28.47], [0.98, 28.90], [0.35, 29.28], [-0.27, 29.59], [-0.85, 29.84], [-1.43, 30.03], [-2.19, 30.22], [-3.14, 30.44], [-4.12, 30.67], [-5.09, 30.90], [-5.85, 31.08], [-7.17, 29.85], [-8.14, 30.08], [-9.11, 30.30], [-10.09, 30.53], [-11.06, 30.76], [-12.03, 30.99], [-13.01, 31.22] ],
++    kerbRight: [ [-31.27, 59.95], [-30.27, 60.02], [-29.27, 60.10], [-28.27, 60.17], [-27.28, 60.25], [-26.28, 60.32], [-25.28, 60.39], [-24.40, 61.96], [-23.40, 62.04], [-22.40, 62.11], [-21.40, 62.18], [-20.41, 62.26], [-19.41, 62.33], [-18.41, 62.41], [-17.41, 62.48], [-16.42, 62.55], [-15.42, 62.63], [-14.42, 62.70], [-13.43, 62.78], [-12.43, 62.85], [-11.43, 62.92], [-10.51, 62.99], [-9.65, 63.03], [-8.78, 63.04], [-7.91, 63.03], [-7.03, 63.00], [-6.15, 62.94], [-5.26, 62.86], [-4.37, 62.77], [-3.48, 62.65], [-2.58, 62.52], [-1.68, 62.36], [-0.78, 62.20], [0.12, 62.01], [1.02, 61.81], [1.92, 61.59], [2.83, 61.36], [3.73, 61.12], [4.63, 60.86], [5.53, 60.59], [6.43, 60.32], [7.32, 60.02], [8.22, 59.72], [9.12, 59.41], [10.02, 59.08], [10.91, 58.75], [11.80, 58.41], [12.69, 58.06], [13.58, 57.70], [14.47, 57.33], [15.35, 56.96], [16.24, 56.58], [17.12, 56.19], [18.00, 55.79], [18.88, 55.39], [19.75, 54.98], [20.63, 54.56], [21.55, 54.12], [22.50, 53.68], [23.44, 53.25], [24.40, 52.82], [25.37, 52.40], [26.34, 51.99], [27.32, 51.59], [28.31, 51.20], [29.31, 50.83], [30.33, 50.46], [31.37, 50.11], [32.41, 49.78], [33.47, 49.47], [34.55, 49.18], [35.65, 48.92], [36.77, 48.68], [37.93, 48.48], [39.12, 48.32], [40.34, 48.21], [41.60, 48.15], [42.93, 48.18], [44.29, 48.31], [45.71, 48.56], [47.19, 48.99], [48.67, 49.61], [50.10, 50.46], [51.43, 51.53], [52.54, 52.72], [53.26, 53.69], [53.79, 54.38], [54.33, 55.03], [54.87, 55.65], [55.40, 56.21], [55.93, 56.71], [56.44, 57.13], [56.89, 57.45], [57.25, 57.66], [57.47, 57.75], [57.50, 57.77], [57.52, 57.76], [57.89, 57.66], [58.51, 57.48], [59.17, 57.23], [59.84, 56.93], [60.52, 56.59], [61.21, 56.19], [61.90, 55.76], [62.59, 55.30], [63.29, 54.80], [63.88, 54.35], [64.26, 54.02], [64.55, 53.68], [64.86, 53.23], [65.17, 52.68], [65.47, 52.06], [65.76, 51.37], [66.03, 50.63], [66.28, 49.85], [66.51, 49.03], [66.72, 48.19], [66.90, 47.34], [67.08, 46.45], [67.23, 45.56], [67.37, 44.66], [67.50, 43.74], [67.61, 42.82], [67.71, 41.89], [67.80, 40.96], [67.88, 40.01], [67.95, 39.06], [68.01, 38.09], [68.07, 37.12], [68.13, 36.15], [68.17, 35.18], [68.21, 34.22], [68.24, 33.26], [68.27, 32.30], [68.28, 31.36], [68.28, 30.42], [68.27, 29.49], [68.25, 28.58], [68.21, 27.69], [68.14, 26.83], [68.06, 26.03], [67.95, 25.33], [67.85, 24.84], [67.85, 24.77], [67.52, 24.38], [66.81, 23.24], [66.20, 22.07], [65.71, 20.99], [65.27, 19.95], [64.87, 18.94], [64.49, 17.93], [64.13, 16.94], [63.78, 15.94], [63.45, 14.96], [63.13, 13.98], [62.81, 12.99], [62.50, 12.01], [62.20, 11.04], [61.90, 10.06], [61.61, 9.08], [61.33, 8.14], [61.06, 7.25], [60.77, 6.38], [60.48, 5.51], [60.16, 4.66], [59.84, 3.83], [59.49, 3.00], [59.14, 2.18], [58.76, 1.39], [58.37, 0.61], [57.96, -0.15], [57.53, -0.89], [57.09, -1.61], [56.63, -2.30], [56.15, -2.98], [55.65, -3.62], [55.14, -4.22], [54.60, -4.81], [54.05, -5.36], [53.48, -5.87], [52.90, -6.34], [52.24, -6.82], [51.46, -7.36], [50.62, -7.95], [49.78, -8.54], [48.95, -9.14], [48.12, -9.74], [47.30, -10.34], [46.47, -10.95], [45.65, -11.56], [44.84, -12.17], [44.02, -12.79], [43.21, -13.41], [42.40, -14.04], [41.59, -14.67], [40.79, -15.30], [39.99, -15.93], [39.20, -16.57], [38.40, -17.22], [37.72, -17.78], [37.23, -18.15], [36.89, -18.35], [36.75, -18.42], [36.81, -18.42], [37.03, -18.44], [37.21, -18.49], [37.21, -18.47], [37.04, -18.30], [36.75, -17.95], [36.42, -17.47], [36.09, -16.89], [35.76, -16.22], [35.43, -15.49], [35.13, -14.72], [34.84, -13.92], [34.56, -13.08], [34.30, -12.21], [34.04, -11.30], [33.78, -10.39], [33.54, -9.47], [33.31, -8.55], [33.08, -7.64], [32.87, -6.72], [32.67, -5.81], [32.49, -4.89], [32.32, -3.97], [32.16, -3.06], [32.02, -2.15], [31.89, -1.24], [31.78, -0.33], [31.69, 0.57], [31.61, 1.47], [31.56, 2.37], [31.52, 3.26], [31.50, 4.15], [31.51, 5.03], [31.54, 5.89], [31.59, 6.76], [31.67, 7.61], [31.78, 8.55], [31.91, 9.69], [31.98, 10.93], [31.99, 12.22], [31.91, 13.55], [31.73, 14.93], [31.41, 16.35], [30.92, 17.80], [30.23, 19.25], [29.34, 20.63], [28.25, 21.89], [27.01, 22.98], [25.67, 23.87], [24.30, 24.56], [23.09, 25.03], [22.17, 25.35], [21.40, 25.66], [20.63, 25.99], [19.88, 26.35], [19.13, 26.74], [18.40, 27.15], [17.68, 27.58], [16.97, 28.05], [16.28, 28.53], [15.59, 29.04], [14.92, 29.57], [14.27, 30.13], [13.62, 30.71], [12.98, 31.31], [12.29, 32.00], [11.51, 32.75], [10.69, 33.50], [9.84, 34.25], [8.96, 34.97], [8.04, 35.69], [7.07, 36.38], [6.06, 37.05], [4.97, 37.69], [3.81, 38.28], [2.55, 38.82], [1.23, 39.26], [0.05, 39.55], [-0.94, 39.79], [-1.92, 40.01], [-2.89, 40.24], [-3.65, 40.42], [-4.28, 42.11], [-5.25, 42.34], [-6.23, 42.57], [-7.20, 42.80], [-8.17, 43.03], [-9.15, 43.26], [-10.12, 43.49] ],
++    barriers: [
++        [ [-30.51, 69.27], [-25.19, 72.73], [-24.20, 72.81], [-23.20, 72.88], [-22.20, 72.96], [-21.20, 73.03], [-20.21, 73.10], [-19.21, 73.18], [-18.21, 73.25], [-17.22, 73.32], [-16.22, 73.40], [-15.22, 73.47], [-14.22, 73.55], [-13.23, 73.62], [-12.23, 73.69], [-11.14, 73.77], [-9.96, 73.82], [-8.80, 73.84], [-7.64, 73.83], [-6.49, 73.78], [-5.35, 73.71], [-4.21, 73.61], [-3.09, 73.49], [-1.98, 73.35], [-0.87, 73.18], [0.22, 73.00], [1.31, 72.79], [2.39, 72.57], [3.45, 72.33], [4.51, 72.08], [5.57, 71.81], [6.61, 71.53], [7.65, 71.23], [8.68, 70.93], [9.70, 70.61], [10.72, 70.27], [11.73, 69.93], [12.73, 69.58], [13.73, 69.23], [14.72, 68.86], [15.71, 68.48], [16.69, 68.09], [17.66, 67.70], [18.63, 67.30], [19.60, 66.89], [20.57, 66.47], [21.52, 66.05], [22.47, 65.63], [23.42, 65.19], [24.36, 64.75], [25.29, 64.30], [26.18, 63.88], [27.03, 63.48], [27.90, 63.08], [28.75, 62.70], [29.60, 62.33], [30.46, 61.97], [31.32, 61.62], [32.18, 61.29], [33.03, 60.97], [33.88, 60.66], [34.72, 60.38], [35.56, 60.11], [36.39, 59.87], [37.22, 59.65], [38.03, 59.45], [38.83, 59.28], [39.59, 59.15], [40.33, 59.05], [41.05, 58.98], [41.72, 58.95], [42.32, 58.96], [42.85, 59.01], [43.29, 59.09], [43.60, 59.17], [43.82, 59.26], [43.97, 59.35], [44.06, 59.42], [44.20, 59.58], [44.63, 60.18], [45.34, 61.10], [46.10, 62.02], [46.91, 62.94], [47.79, 63.87], [48.77, 64.79], [49.86, 65.70], [51.14, 66.59], [52.65, 67.43], [54.47, 68.13], [56.63, 68.54], [58.85, 68.48], [60.59, 68.12], [61.96, 67.71], [63.25, 67.23], [64.47, 66.69], [65.63, 66.10], [66.72, 65.48], [67.77, 64.83], [68.77, 64.16], [69.73, 63.47], [70.77, 62.67], [71.97, 61.58], [73.08, 60.30], [73.98, 59.01], [74.71, 57.75], [75.32, 56.51], [75.82, 55.30], [76.25, 54.11], [76.63, 52.94], [76.95, 51.79], [77.23, 50.66], [77.48, 49.53], [77.70, 48.42], [77.89, 47.32], [78.06, 46.23], [78.21, 45.14], [78.34, 44.07], [78.46, 42.99], [78.56, 41.92], [78.65, 40.86], [78.73, 39.80], [78.79, 38.77], [78.86, 37.74], [78.91, 36.70], [78.96, 35.66], [79.00, 34.62], [79.04, 33.57], [79.06, 32.52], [79.08, 31.45], [79.08, 30.38], [79.07, 29.29], [79.04, 28.18], [78.99, 27.04], [78.90, 25.87], [78.77, 24.63], [78.56, 23.29], [78.18, 21.71], [77.38, 19.69], [76.49, 18.36], [76.18, 17.87], [75.91, 17.34], [75.59, 16.64], [75.27, 15.87], [74.94, 15.05], [74.62, 14.20], [74.31, 13.33], [74.00, 12.44], [73.70, 11.54], [73.40, 10.63], [73.10, 9.72], [72.81, 8.80], [72.52, 7.87], [72.24, 6.94], [71.96, 6.00], [71.67, 5.03], [71.35, 3.99], [71.01, 2.93], [70.65, 1.89], [70.27, 0.84], [69.86, -0.21], [69.42, -1.25], [68.96, -2.29], [68.47, -3.34], [67.95, -4.37], [67.40, -5.40], [66.81, -6.43], [66.18, -7.44], [65.51, -8.45], [64.80, -9.43], [64.04, -10.41], [63.23, -11.37], [62.38, -12.30], [61.48, -13.20], [60.51, -14.07], [59.50, -14.89], [58.51, -15.62], [57.63, -16.23], [56.84, -16.78], [56.04, -17.34], [55.25, -17.91], [54.47, -18.48], [53.68, -19.05], [52.90, -19.63], [52.12, -20.21], [51.34, -20.79], [50.57, -21.38], [49.80, -21.97], [49.03, -22.56], [48.26, -23.16], [47.50, -23.76], [46.74, -24.37], [45.98, -24.98], [45.22, -25.59], [44.34, -26.31], [43.14, -27.19], [41.61, -28.06], [39.71, -28.80], [37.42, -29.20], [34.90, -29.03], [32.56, -28.23], [30.66, -27.06], [29.22, -25.76], [28.14, -24.47], [27.27, -23.21], [26.57, -21.99], [25.99, -20.82], [25.48, -19.67], [25.03, -18.54], [24.63, -17.43], [24.27, -16.34], [23.94, -15.28], [23.65, -14.25], [23.36, -13.22], [23.09, -12.19], [22.82, -11.16], [22.57, -10.12], [22.33, -9.07], [22.10, -8.01], [21.89, -6.95], [21.69, -5.89], [21.50, -4.81], [21.33, -3.73], [21.18, -2.64], [21.05, -1.54], [20.93, -0.43], [20.84, 0.68], [20.77, 1.81], [20.72, 2.94], [20.70, 4.09], [20.71, 5.24], [20.75, 6.40], [20.82, 7.57], [20.93, 8.75], [21.05, 9.80], [21.14, 10.61], [21.19, 11.30], [21.19, 11.95], [21.16, 12.53], [21.10, 13.03], [21.00, 13.45], [20.90, 13.77], [20.80, 13.99], [20.69, 14.16], [20.59, 14.28], [20.45, 14.40], [20.24, 14.53], [19.95, 14.67], [19.36, 14.89], [18.38, 15.24], [17.26, 15.68], [16.15, 16.16], [15.07, 16.68], [14.00, 17.23], [12.95, 17.82], [11.93, 18.44], [10.93, 19.10], [9.96, 19.78], [9.01, 20.48], [8.08, 21.22], [7.18, 21.98], [6.31, 22.75], [5.48, 23.54], [4.75, 24.27], [4.10, 24.89], [3.47, 25.47], [2.84, 26.02], [2.21, 26.55], [1.58, 27.04], [0.96, 27.48], [0.35, 27.88], [-0.23, 28.22], [-0.78, 28.51], [-1.28, 28.72], [-1.76, 28.88], [-2.47, 29.05], [-3.42, 29.27], [-4.39, 29.50], [-5.36, 29.73], [-6.12, 29.91], [-4.22, 29.62] ],
++        [ [-22.27, 61.11], [-24.31, 60.77], [-23.31, 60.84], [-22.31, 60.91], [-21.31, 60.99], [-20.32, 61.06], [-19.32, 61.14], [-18.32, 61.21], [-17.33, 61.28], [-16.33, 61.36], [-15.33, 61.43], [-14.33, 61.51], [-13.34, 61.58], [-12.34, 61.65], [-11.35, 61.73], [-10.44, 61.79], [-9.62, 61.83], [-8.78, 61.84], [-7.94, 61.83], [-7.09, 61.80], [-6.24, 61.74], [-5.38, 61.67], [-4.51, 61.58], [-3.64, 61.46], [-2.77, 61.33], [-1.89, 61.18], [-1.01, 61.02], [-0.13, 60.84], [0.75, 60.64], [1.64, 60.43], [2.52, 60.20], [3.41, 59.96], [4.30, 59.71], [5.18, 59.45], [6.07, 59.17], [6.95, 58.88], [7.83, 58.59], [8.72, 58.28], [9.61, 57.96], [10.49, 57.63], [11.37, 57.29], [12.25, 56.95], [13.13, 56.59], [14.01, 56.23], [14.88, 55.86], [15.75, 55.48], [16.63, 55.09], [17.51, 54.70], [18.37, 54.30], [19.24, 53.89], [20.12, 53.48], [21.03, 53.04], [21.99, 52.59], [22.95, 52.15], [23.91, 51.72], [24.90, 51.29], [25.89, 50.88], [26.88, 50.47], [27.88, 50.08], [28.90, 49.70], [29.94, 49.33], [30.99, 48.97], [32.06, 48.64], [33.14, 48.32], [34.25, 48.02], [35.38, 47.75], [36.54, 47.50], [37.75, 47.29], [38.99, 47.12], [40.26, 47.01], [41.59, 46.95], [42.99, 46.98], [44.45, 47.12], [45.98, 47.39], [47.59, 47.85], [49.21, 48.54], [50.79, 49.47], [52.25, 50.65], [53.46, 51.96], [54.22, 52.97], [54.73, 53.63], [55.24, 54.26], [55.75, 54.84], [56.25, 55.36], [56.73, 55.81], [57.17, 56.18], [57.53, 56.44], [57.62, 56.49], [58.13, 56.34], [58.71, 56.12], [59.32, 55.85], [59.95, 55.53], [60.60, 55.16], [61.25, 54.76], [61.91, 54.31], [62.57, 53.83], [63.12, 53.42], [63.41, 53.17], [63.60, 52.95], [63.84, 52.59], [64.11, 52.12], [64.38, 51.56], [64.65, 50.93], [64.90, 50.24], [65.13, 49.50], [65.35, 48.73], [65.55, 47.92], [65.73, 47.09], [65.90, 46.24], [66.05, 45.37], [66.18, 44.49], [66.31, 43.59], [66.42, 42.68], [66.52, 41.77], [66.61, 40.85], [66.69, 39.92], [66.75, 38.98], [66.82, 38.02], [66.87, 37.05], [66.93, 36.09], [66.97, 35.13], [67.01, 34.18], [67.04, 33.23], [67.07, 32.28], [67.08, 31.35], [67.08, 30.42], [67.07, 29.51], [67.05, 28.62], [67.01, 27.76], [66.95, 26.94], [66.87, 26.18], [66.77, 25.55], [66.71, 25.25], [66.53, 25.04], [65.77, 23.84], [65.12, 22.60], [64.61, 21.48], [64.16, 20.41], [63.75, 19.37], [63.36, 18.35], [63.00, 17.34], [62.65, 16.33], [62.31, 15.34], [61.99, 14.35], [61.67, 13.36], [61.36, 12.37], [61.05, 11.39], [60.75, 10.40], [60.46, 9.42], [60.18, 8.48], [59.91, 7.61], [59.64, 6.76], [59.34, 5.92], [59.04, 5.09], [58.72, 4.27], [58.39, 3.47], [58.04, 2.68], [57.68, 1.92], [57.30, 1.16], [56.91, 0.43], [56.50, -0.28], [56.08, -0.96], [55.64, -1.62], [55.18, -2.26], [54.72, -2.86], [54.24, -3.43], [53.73, -3.98], [53.22, -4.49], [52.70, -4.96], [52.16, -5.39], [51.54, -5.85], [50.77, -6.38], [49.93, -6.97], [49.09, -7.56], [48.25, -8.16], [47.42, -8.77], [46.59, -9.37], [45.76, -9.98], [44.93, -10.60], [44.11, -11.21], [43.29, -11.83], [42.48, -12.46], [41.66, -13.09], [40.85, -13.72], [40.05, -14.36], [39.24, -15.00], [38.44, -15.64], [37.64, -16.29], [37.29, -16.58], [37.15, -16.32], [36.84, -15.71], [36.54, -15.02], [36.25, -14.29], [35.97, -13.53], [35.71, -12.72], [35.45, -11.86], [35.19, -10.97], [34.94, -10.07], [34.70, -9.17], [34.47, -8.26], [34.25, -7.36], [34.04, -6.46], [33.85, -5.56], [33.67, -4.66], [33.50, -3.76], [33.34, -2.87], [33.21, -1.98], [33.08, -1.08], [32.97, -0.20], [32.88, 0.69], [32.81, 1.56], [32.75, 2.43], [32.72, 3.30], [32.70, 4.15], [32.71, 5.00], [32.74, 5.84], [32.79, 6.67], [32.86, 7.48], [32.97, 8.41], [33.10, 9.59], [33.18, 10.89], [33.19, 12.25], [33.11, 13.66], [32.91, 15.14], [32.56, 16.67], [32.03, 18.25], [31.28, 19.83], [30.30, 21.35], [29.10, 22.74], [27.74, 23.93], [26.28, 24.91], [24.78, 25.66], [23.50, 26.16], [22.59, 26.48], [21.86, 26.77], [21.13, 27.08], [20.41, 27.43], [19.70, 27.79], [19.01, 28.18], [18.32, 28.60], [17.64, 29.04], [16.98, 29.51], [16.33, 29.99], [15.68, 30.50], [15.05, 31.03], [14.43, 31.59], [13.82, 32.17], [13.13, 32.86], [12.33, 33.62], [11.49, 34.39], [10.62, 35.16], [9.71, 35.91], [8.76, 36.65], [7.75, 37.37], [6.69, 38.07], [5.55, 38.74], [4.32, 39.37], [2.98, 39.94], [1.56, 40.41], [0.33, 40.72], [-0.67, 40.95], [-1.64, 41.18], [-2.62, 41.41], [-3.38, 41.59], [-5.57, 41.36] ]
++    ]
++}
++
++// Guidage (flèche au sol, distance) : ligne centrale de l'île puis jusqu'à l'arrivée
 +// legEnds[k] = indice, dans points, de la porte visée quand k portes ont été franchies
 +export const grandTourGuide = {
-+    points: [ [-9.2, 5.8], [-11.2, -0.2], [-8.2, -19.8], [-1.2, -20.8], [-0.2, -25.8], [3.8, -29.2], [3.2, -33.8], [6.8, -36.8], [14.8, -36.8], [25.2, -44.8], [37.2, -47.8], [53.2, -57.8], [52.2, -71.8], [39.8, -80.2], [23.8, -82.8], [17.8, -77.8], [2.8, -81.8], [-3.2, -80.2], [-12.2, -72.2], [-15.2, -47.2], [-22.2, -31.2], [-61.8, -27.2], [-81.8, -38.2], [-76.2, -58.8], [-81.8, -63.2], [-79.8, -67.2], [-70.8, -79.2], [-43.2, -77.2], [-38.2, -66.2], [-45.2, -78.8], [-73.2, -77.8], [-79.2, -67.8], [-81.8, -63.8], [-75.8, -57.8], [-82.2, -38.8], [-56.8, -24.2], [-41.8, -22.2], [-42.8, 8.8], [-52.2, 12.8], [-60.8, 15.8], [-82.2, 27.8], [-80.8, 33.2], [-76.2, 37.2], [-80.8, 41.2], [-81.8, 47.2], [-76.8, 49.8], [-73.2, 61.8], [-56.2, 70.8], [-27.2, 65.8], [-24.8, 66.8], [-11.8, 60.2], [1.8, 68.8], [10.2, 71.8], [12.8, 73.2], [15.2, 73.2], [16.2, 72.2], [23.8, 60.8], [43.8, 48.8], [47.8, 55.8], [48.2, 56.2], [62.2, 61.8], [62.8, 61.8], [63.2, 61.8], [63.8, 61.8], [64.2, 61.8], [64.8, 61.2], [65.2, 61.2], [65.8, 61.2], [66.2, 61.2], [66.8, 61.2], [67.2, 60.8], [72.2, 55.2], [76.8, 34.2], [76.8, 27.2], [69.8, 19.8], [77.2, 15.8], [79.2, 4.8], [75.2, 0.8], [58.8, -3.8], [57.8, -4.8], [52.8, -8.2], [49.2, -20.8], [54.2, -31.8], [52.2, -34.8], [52.2, -35.8], [54.2, -37.8], [58.2, -37.8], [61.8, -34.8], [62.2, -34.2], [66.2, -29.2], [66.2, -28.8], [66.2, -28.2], [66.2, -27.8], [66.2, -28.2], [66.2, -28.8], [66.2, -29.2], [66.2, -31.2], [64.2, -33.2], [63.2, -33.2], [62.8, -33.2], [47.8, -15.2], [45.2, -26.2], [33.8, -27.2], [38.8, -15.2], [25.8, -0.2], [27.8, 18.2], [28.8, 18.8], [14.8, 22.8], [7.2, 23.8], [4.2, 33.2], [3.8, 33.8], [3.2, 33.8], [2.8, 33.8], [2.2, 33.2], [1.8, 33.2], [1.2, 33.2], [0.8, 33.2], [0.2, 33.2], [-4.8, 35.8], [-8.8, 23.8], [-11.2, -0.2] ],
-+    legEnds: [ 1, 10, 13, 19, 21, 28, 39, 47, 51, 57, 60, 74, 92, 100, 102, 104, 106, 107, 110, 120 ]
++    points: [ [-24.75, 66.75], [-23.75, 66.82], [-22.76, 66.90], [-21.76, 66.97], [-20.76, 67.05], [-19.76, 67.12], [-18.77, 67.19], [-17.77, 67.27], [-16.77, 67.34], [-15.77, 67.41], [-14.78, 67.49], [-13.78, 67.56], [-12.78, 67.64], [-11.79, 67.71], [-10.79, 67.78], [-9.79, 67.83], [-8.79, 67.84], [-7.79, 67.83], [-6.79, 67.79], [-5.79, 67.73], [-4.80, 67.64], [-3.80, 67.53], [-2.81, 67.41], [-1.82, 67.26], [-0.84, 67.09], [0.15, 66.90], [1.13, 66.70], [2.10, 66.48], [3.07, 66.25], [4.04, 66.00], [5.01, 65.74], [5.97, 65.47], [6.93, 65.19], [7.88, 64.89], [8.84, 64.58], [9.78, 64.26], [10.73, 63.93], [11.67, 63.59], [12.61, 63.24], [13.54, 62.89], [14.47, 62.52], [15.40, 62.14], [16.32, 61.76], [17.24, 61.37], [18.16, 60.98], [19.07, 60.57], [19.99, 60.16], [20.90, 59.75], [21.80, 59.32], [22.70, 58.89], [23.61, 58.46], [24.51, 58.03], [25.42, 57.62], [26.33, 57.21], [27.25, 56.81], [28.17, 56.42], [29.10, 56.05], [30.03, 55.68], [30.97, 55.33], [31.91, 55.00], [32.86, 54.68], [33.81, 54.38], [34.77, 54.09], [35.73, 53.83], [36.71, 53.60], [37.68, 53.39], [38.67, 53.22], [39.66, 53.09], [40.66, 52.99], [41.66, 52.95], [42.65, 52.97], [43.65, 53.07], [44.63, 53.24], [45.60, 53.51], [46.52, 53.90], [47.38, 54.41], [48.15, 55.03], [48.83, 55.77], [49.42, 56.57], [50.03, 57.37], [50.67, 58.14], [51.33, 58.89], [52.02, 59.61], [52.75, 60.30], [53.51, 60.94], [54.33, 61.52], [55.20, 62.00], [56.14, 62.36], [57.12, 62.56], [58.11, 62.52], [59.09, 62.31], [60.05, 62.02], [60.98, 61.67], [61.90, 61.27], [62.79, 60.82], [63.66, 60.32], [64.51, 59.79], [65.34, 59.24], [66.15, 58.65], [66.94, 58.04], [67.69, 57.38], [68.34, 56.62], [68.91, 55.80], [69.41, 54.94], [69.85, 54.04], [70.23, 53.11], [70.58, 52.17], [70.88, 51.22], [71.15, 50.26], [71.39, 49.29], [71.60, 48.31], [71.80, 47.33], [71.97, 46.35], [72.12, 45.36], [72.26, 44.37], [72.38, 43.37], [72.49, 42.38], [72.58, 41.38], [72.67, 40.39], [72.74, 39.39], [72.81, 38.39], [72.87, 37.39], [72.92, 36.40], [72.97, 35.40], [73.01, 34.40], [73.04, 33.40], [73.07, 32.40], [73.08, 31.40], [73.08, 30.40], [73.07, 29.40], [73.05, 28.40], [73.00, 27.40], [72.93, 26.40], [72.82, 25.41], [72.67, 24.42], [72.44, 23.45], [72.09, 22.51], [71.51, 21.70], [70.98, 20.86], [70.52, 19.97], [70.10, 19.06], [69.71, 18.14], [69.34, 17.21], [68.99, 16.27], [68.65, 15.33], [68.32, 14.39], [68.00, 13.44], [67.69, 12.49], [67.38, 11.54], [67.08, 10.58], [66.79, 9.63], [66.50, 8.67], [66.21, 7.71], [65.93, 6.75], [65.63, 5.80], [65.32, 4.85], [65.00, 3.90], [64.65, 2.96], [64.29, 2.03], [63.91, 1.11], [63.50, 0.19], [63.08, -0.71], [62.63, -1.60], [62.15, -2.49], [61.66, -3.35], [61.13, -4.20], [60.58, -5.03], [59.99, -5.85], [59.38, -6.64], [58.73, -7.40], [58.06, -8.14], [57.35, -8.84], [56.61, -9.51], [55.83, -10.14], [55.02, -10.73], [54.20, -11.30], [53.38, -11.88], [52.57, -12.45], [51.75, -13.04], [50.94, -13.62], [50.13, -14.21], [49.33, -14.80], [48.53, -15.40], [47.73, -16.00], [46.93, -16.61], [46.14, -17.21], [45.35, -17.83], [44.56, -18.44], [43.77, -19.06], [42.99, -19.68], [42.21, -20.31], [41.43, -20.94], [40.66, -21.57], [39.86, -22.16], [38.99, -22.67], [38.06, -23.04], [37.08, -23.21], [36.09, -23.15], [35.14, -22.82], [34.30, -22.29], [33.56, -21.62], [32.92, -20.85], [32.36, -20.02], [31.86, -19.16], [31.41, -18.26], [31.01, -17.35], [30.64, -16.42], [30.30, -15.48], [29.99, -14.53], [29.70, -13.57], [29.42, -12.61], [29.15, -11.65], [28.89, -10.68], [28.65, -9.71], [28.41, -8.74], [28.19, -7.77], [27.98, -6.79], [27.78, -5.81], [27.59, -4.82], [27.42, -3.84], [27.27, -2.85], [27.13, -1.86], [27.01, -0.87], [26.91, 0.13], [26.82, 1.12], [26.76, 2.12], [26.72, 3.12], [26.70, 4.12], [26.71, 5.12], [26.74, 6.12], [26.80, 7.12], [26.89, 8.11], [27.01, 9.11], [27.12, 10.10], [27.18, 11.10], [27.19, 12.10], [27.13, 13.10], [27.00, 14.09], [26.78, 15.06], [26.47, 16.01], [26.04, 16.91], [25.50, 17.75], [24.84, 18.51], [24.09, 19.17], [23.26, 19.72], [22.37, 20.17], [21.43, 20.52], [20.49, 20.86], [19.56, 21.22], [18.64, 21.62], [17.74, 22.05], [16.85, 22.51], [15.98, 23.00], [15.13, 23.52], [14.29, 24.07], [13.47, 24.64], [12.67, 25.24], [11.88, 25.86], [11.12, 26.51], [10.37, 27.17], [9.65, 27.86], [8.94, 28.56], [8.22, 29.26], [7.48, 29.93], [6.73, 30.59], [5.96, 31.23], [5.17, 31.84], [4.36, 32.43], [3.52, 32.98], [2.66, 33.48], [1.77, 33.94], [0.85, 34.33], [-0.10, 34.65], [-1.07, 34.88], [-2.04, 35.11], [-3.02, 35.34], [-3.99, 35.57], [-4.75, 35.75], [-4.93, 34.74], [-5.11, 33.74], [-5.29, 32.73], [-5.47, 31.73], [-5.65, 30.72], [-5.83, 29.71], [-6.01, 28.71], [-6.19, 27.70], [-6.38, 26.70], [-6.56, 25.69], [-6.74, 24.68], [-6.92, 23.68], [-7.10, 22.67], [-7.28, 21.66], [-7.46, 20.66], [-7.64, 19.65], [-7.82, 18.65], [-8.00, 17.64], [-8.18, 16.63], [-8.36, 15.63], [-8.54, 14.62], [-8.72, 13.62], [-8.90, 12.61], [-9.08, 11.60], [-9.26, 10.60], [-9.44, 9.59], [-9.62, 8.59], [-9.81, 7.58], [-9.99, 6.57], [-10.17, 5.57], [-10.35, 4.56], [-10.53, 3.55], [-10.71, 2.55], [-10.89, 1.54], [-11.07, 0.54], [-11.25, -0.47] ],
++    legEnds: [ 0, 0, 0, 0, 0, 0, 0, 0, 26, 70, 93, 140, 166, 183, 198, 223, 240, 253, 268, 313 ]
 +}
 diff --git a/sources/index.js b/sources/index.js
 index e82f637..6257d22 100644
