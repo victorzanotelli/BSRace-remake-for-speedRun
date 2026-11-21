@@ -1173,7 +1173,7 @@ index 0000000..014c051
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..c0b6a4a
+index 0000000..83a545f
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
 @@ -0,0 +1,1307 @@
@@ -1196,8 +1196,8 @@ index 0000000..c0b6a4a
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
 +const COURSES = { circuit: 'Circuit', tour: 'Grand tour' }
-+// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A (1.4.x), 3 = île aplanie et piste à barrières (1.5.0))
-+const TRACKS = { tour: 3 }
++// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A (1.4.x), 3 = île aplanie et piste à barrières (1.5.0), 4 = obstacles sur l'île (1.6.0))
++const TRACKS = { tour: 4 }
 +const SETTINGS_KEY = 'bs-tas-settings'
 +const FINE_INTERVAL = 5
 +const FINE_MAX = 12
@@ -2485,9 +2485,18 @@ index 0000000..c0b6a4a
 +    }
 +}
 diff --git a/sources/Game/Terrain.js b/sources/Game/Terrain.js
-index 0ecbd70..335475f 100644
+index 0ecbd70..4025cd7 100644
 --- a/sources/Game/Terrain.js
 +++ b/sources/Game/Terrain.js
+@@ -1,7 +1,7 @@
+ import * as THREE from 'three/webgpu'
+ import { Game } from './Game.js'
+ import MeshGridMaterial, { MeshGridMaterialLine } from './Materials/MeshGridMaterial.js'
+-import { color, Fn, mix, round, smoothstep, texture, uniform, uv, vec2 } from 'three/tsl'
++import { color, Fn, max, mix, round, smoothstep, texture, uniform, uv, vec2 } from 'three/tsl'
+ 
+ export class Terrain
+ {
 @@ -85,6 +85,14 @@ export class Terrain
          this.grassColorUniform = uniform(color('#b8b62e'))
          this.tracksDelta = uniform(vec2(0))
@@ -2503,12 +2512,14 @@ index 0ecbd70..335475f 100644
          const worldPositionToUvNode = Fn(([position]) =>
          {
              return position.div(this.subdivision).div(1.5).add(0.5)
-@@ -102,6 +110,9 @@ export class Terrain
+@@ -102,6 +110,11 @@ export class Terrain
              )
              data.g.mulAssign(groundDataColor.r.oneMinus())
  
-+            // Masque d'herbe (piste de l'île)
-+            data.g.mulAssign(texture(this.grassMask, textureUv).r.mul(this.grassMaskStrength).oneMinus())
++            // Masque de la piste de l'île (Grand tour) : rouge = pas d'herbe, vert = trottoir dallé
++            const islandMask = texture(this.grassMask, textureUv)
++            data.g.mulAssign(islandMask.r.mul(this.grassMaskStrength).oneMinus())
++            data.r.assign(max(data.r, islandMask.g.mul(this.grassMaskStrength)))
 +
              return data
          })
@@ -2532,18 +2543,19 @@ index 3bbb2bb..e38c47f 100644
                  gsap.delayedCall(2.2, () =>
                  {
 diff --git a/sources/Game/World/Areas/CircuitArea.js b/sources/Game/World/Areas/CircuitArea.js
-index bb760e6..b046c8a 100644
+index bb760e6..f18908b 100644
 --- a/sources/Game/World/Areas/CircuitArea.js
 +++ b/sources/Game/World/Areas/CircuitArea.js
-@@ -10,6 +10,7 @@ import { alea } from 'seedrandom'
+@@ -10,6 +10,8 @@ import { alea } from 'seedrandom'
  import { InputFlag } from '../../InputFlag.js'
  import { Area } from './Area.js'
  import { timeToRaceString, timeToReadableString } from '../../utilities/time.js'
 +import { grandTourGates, grandTourRailGaps, grandTourOutOfBoundsY, grandTourGuide, grandTourIsland } from '../../../data/grandTour.js'
++import { TourObstacles } from '../TourObstacles.js'
  
  export class CircuitArea extends Area
  {
-@@ -37,15 +38,17 @@ export class CircuitArea extends Area
+@@ -37,15 +39,17 @@ export class CircuitArea extends Area
          this.setStartPosition()
          this.setStartingLights()
          this.setTimer()
@@ -2562,7 +2574,7 @@ index bb760e6..b046c8a 100644
          this.setAirDancers()
          this.setBanners()
          this.setMenu()
-@@ -317,36 +320,26 @@ export class CircuitArea extends Area
+@@ -317,36 +321,26 @@ export class CircuitArea extends Area
          this.checkpoints.reachedCount = 0
          this.checkpoints.timings = []
  
@@ -2608,7 +2620,7 @@ index bb760e6..b046c8a 100644
  
              checkpoint.a.rotateAround(checkpoint.center, - checkpoint.rotation)
              checkpoint.b.rotateAround(checkpoint.center, - checkpoint.rotation)
-@@ -410,7 +403,8 @@ export class CircuitArea extends Area
+@@ -410,7 +404,8 @@ export class CircuitArea extends Area
                  this.sounds.checkpoint.play(this.checkpoints.reachedCount)
  
                  // Timings
@@ -2618,7 +2630,7 @@ index bb760e6..b046c8a 100644
  
                  // Final checkpoint (start line)
                  if(this.checkpoints.reachedCount === this.checkpoints.count + 2)
-@@ -429,14 +423,43 @@ export class CircuitArea extends Area
+@@ -429,14 +424,43 @@ export class CircuitArea extends Area
                  this.checkpoints.target
              }
  
@@ -2635,7 +2647,7 @@ index bb760e6..b046c8a 100644
 +        {
 +            baseCheckpoint.rotation.reorder('YXZ')
 +            baseCheckpoint.visible = false
-+
+ 
 +            // Respawn position
 +            const respawnPosition = baseCheckpoint.position.clone()
 +            const direction = new THREE.Vector2(3, 0)
@@ -2643,7 +2655,7 @@ index bb760e6..b046c8a 100644
 +            respawnPosition.x += direction.y
 +            respawnPosition.y = 4
 +            respawnPosition.z += direction.x
- 
++
 +            circuitItems.push(createCheckpoint(i, baseCheckpoint.position, baseCheckpoint.rotation.y, baseCheckpoint.scale.x * 0.5, respawnPosition))
              i++
          }
@@ -2665,7 +2677,7 @@ index bb760e6..b046c8a 100644
          // Checkpoint doors
          const doorIntensity = uniform(2)
          const doorOutputColor = Fn(([doorColor, doorScale]) =>
-@@ -508,6 +531,16 @@ export class CircuitArea extends Area
+@@ -508,6 +532,16 @@ export class CircuitArea extends Area
          }
      }
  
@@ -2682,7 +2694,7 @@ index bb760e6..b046c8a 100644
      setResetObjects()
      {
          this.resetObjects = {}
-@@ -564,9 +597,371 @@ export class CircuitArea extends Area
+@@ -564,25 +598,662 @@ export class CircuitArea extends Area
          railsMesh.material.side = THREE.DoubleSide
  
          this.rails.object = railsMesh.userData.object
@@ -2838,7 +2850,7 @@ index bb760e6..b046c8a 100644
 +                    for(const [ x, z ] of line)
 +                    {
 +                        toLocal(x, -1.6, z, wallVertices)
-+                        toLocal(x, 1.1, z, wallVertices)
++                        toLocal(x, this.tourObstacles.wallTopAt(x, z, 1.1), z, wallVertices)
 +                    }
 +                    for(let i = 0; i < line.length - 1; i++)
 +                    {
@@ -2858,7 +2870,7 @@ index bb760e6..b046c8a 100644
 +            {
 +                const road = this.roadBody.collider(0)
 +                const roadVertices = [], roadIndices = []
-+                const left = grandTourIsland.roadLeft, right = grandTourIsland.roadRight
++                const left = grandTourIsland.physLeft, right = grandTourIsland.physRight
 +                for(let i = 0; i < left.length; i++)
 +                {
 +                    toLocal(left[i][0], 0.02, left[i][1], roadVertices)
@@ -2878,117 +2890,149 @@ index bb760e6..b046c8a 100644
 +                this.rails.islandRoad = this.game.physics.world.createCollider(roadDescription, body)
 +                this.rails.islandRoad.setEnabled(this.course === 'tour')
 +            }
++
++            // Obstacles de l'île
++            this.tourObstacles.createPhysics({
++                staticBody: body,
++                roadCollider: this.roadBody.collider(0),
++                obstacleCollider: this.obstacles.items[0].object.physical.body.collider(0),
++            })
++            this.tourObstacles.setEnabled(this.course === 'tour', body.isEnabled())
 +        }
 +
-+        // Piste de l'île (affichage) : route et barrières, enfants de la barrière du circuit (affichées et retirées avec elle)
++        // Piste de l'île (affichage), comme le circuit de base : asphalte (même matériau), vibreurs rouges et blancs
++        // dans les virages (couleurs de la palette), trottoir dallé (dalles du terrain), barrières (même matériau et
++        // même hauteur que celles du circuit). Enfants de la barrière du circuit : affichés et retirés avec elle.
 +        {
 +            const island = new THREE.Group()
 +            island.visible = false
-+
-+            // Route : même matériau que la route du circuit
 +            const left = grandTourIsland.roadLeft, right = grandTourIsland.roadRight
-+            const roadPositions = [], roadNormals = [], roadIndices = []
-+            for(let i = 0; i < left.length; i++)
++            const strip = (pointsA, pointsB, y, uvAt) =>
 +            {
-+                roadPositions.push(left[i][0], 0.04, left[i][1], right[i][0], 0.04, right[i][1])
-+                roadNormals.push(0, 1, 0, 0, 1, 0)
++                const positions = [], normals = [], uvs = [], indices = []
++                let along = 0
++                for(let i = 0; i < pointsA.length; i++)
++                {
++                    if(i > 0) along += Math.hypot(pointsA[i][0] - pointsA[i - 1][0], pointsA[i][1] - pointsA[i - 1][1])
++                    positions.push(pointsA[i][0], y, pointsA[i][1], pointsB[i][0], y, pointsB[i][1])
++                    normals.push(0, 1, 0, 0, 1, 0)
++                    uvs.push(...uvAt(along, 0), ...uvAt(along, 1))
++                }
++                for(let i = 0; i < pointsA.length - 1; i++)
++                {
++                    const a = i * 2, b = a + 1, c = a + 2, d = a + 3
++                    indices.push(a, b, c, b, d, c)
++                }
++                const geometry = new THREE.BufferGeometry()
++                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
++                geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
++                geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
++                geometry.setIndex(indices)
++                geometry.computeBoundingSphere()
++                return geometry
 +            }
-+            for(let i = 0; i < left.length - 1; i++)
-+            {
-+                const a = i * 2, b = a + 1, c = a + 2, d = a + 3
-+                roadIndices.push(a, b, c, b, d, c)
-+            }
-+            const roadGeometry = new THREE.BufferGeometry()
-+            roadGeometry.setAttribute('position', new THREE.Float32BufferAttribute(roadPositions, 3))
-+            roadGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(roadNormals, 3))
-+            roadGeometry.setIndex(roadIndices)
-+            roadGeometry.computeBoundingSphere()
++
++            // Asphalte : matériau de la route du circuit (uv.y de 0 à 1 d'un bord à l'autre, comme la route du circuit)
 +            const sceneryRoad = this.game.world.scenery?.references?.items.get('road')?.[0]
 +            let roadMaterial = sceneryRoad?.material ?? new MeshDefaultMaterial({ colorNode: color('#383039'), hasWater: false })
 +            roadMaterial = roadMaterial.clone()
 +            roadMaterial.side = THREE.DoubleSide
-+            const road = new THREE.Mesh(roadGeometry, roadMaterial)
++            const road = new THREE.Mesh(strip(left, right, 0.02, (along, side) => [ along / 10, side ]), roadMaterial)
 +            road.receiveShadow = true
 +            island.add(road)
 +
-+            // Vibreurs : bandes rouges et blanches au bord de la route
-+            const kerbPositions = [], kerbUvs = [], kerbIndices = []
-+            for(const [ outer, inner ] of [ [ grandTourIsland.roadLeft, grandTourIsland.kerbLeft ], [ grandTourIsland.roadRight, grandTourIsland.kerbRight ] ])
++            // Vibreurs : blocs de 1,5 m alternés rouge / blanc, seulement dans les virages
 +            {
-+                const base = kerbPositions.length / 3
-+                let along = 0
-+                for(let i = 0; i < outer.length; i++)
++                const positions = [], normals = [], uvs = []
++                const flags = grandTourIsland.kerbFlags
++                for(const [ outer, inner ] of [ [ grandTourIsland.roadLeft, grandTourIsland.kerbLeft ], [ grandTourIsland.roadRight, grandTourIsland.kerbRight ] ])
 +                {
-+                    if(i > 0) along += Math.hypot(inner[i][0] - inner[i - 1][0], inner[i][1] - inner[i - 1][1])
-+                    kerbPositions.push(outer[i][0], 0.06, outer[i][1], inner[i][0], 0.06, inner[i][1])
-+                    kerbUvs.push(along / 3, 0, along / 3, 1)
++                    let along = 0
++                    for(let i = 0; i < outer.length - 1; i++)
++                    {
++                        const length = Math.hypot(inner[i + 1][0] - inner[i][0], inner[i + 1][1] - inner[i][1])
++                        if(flags[i] && flags[i + 1])
++                        {
++                            const u = Math.floor((along + length * 0.5) / 1.5) % 2 === 0 ? 66.5 / 128 : 70.5 / 128
++                            const quad = [ outer[i], inner[i], outer[i + 1], inner[i], inner[i + 1], outer[i + 1] ]
++                            for(const [ x, z ] of quad)
++                            {
++                                positions.push(x, 0.05, z)
++                                normals.push(0, 1, 0)
++                                uvs.push(u, 0.5)
++                            }
++                        }
++                        along += length
++                    }
 +                }
-+                for(let i = 0; i < outer.length - 1; i++)
-+                {
-+                    const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3
-+                    kerbIndices.push(a, b, c, b, d, c)
-+                }
++                const geometry = new THREE.BufferGeometry()
++                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
++                geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
++                geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
++                geometry.computeBoundingSphere()
++                const kerbMaterial = this.game.materials.getFromName('palette').clone()
++                kerbMaterial.side = THREE.DoubleSide
++                const kerbs = new THREE.Mesh(geometry, kerbMaterial)
++                kerbs.receiveShadow = true
++                island.add(kerbs)
 +            }
-+            const kerbGeometry = new THREE.BufferGeometry()
-+            kerbGeometry.setAttribute('position', new THREE.Float32BufferAttribute(kerbPositions, 3))
-+            kerbGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(kerbPositions.map((_, i) => i % 3 === 1 ? 1 : 0), 3))
-+            kerbGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(kerbUvs, 2))
-+            kerbGeometry.setIndex(kerbIndices)
-+            kerbGeometry.computeBoundingSphere()
-+            const kerbMaterial = new MeshDefaultMaterial({
-+                colorNode: mix(color('#d8183c'), color('#f3eee8'), uv().x.fract().step(0.5)),
-+                side: THREE.DoubleSide,
-+                hasWater: false
-+            })
-+            const kerbs = new THREE.Mesh(kerbGeometry, kerbMaterial)
-+            kerbs.receiveShadow = true
-+            island.add(kerbs)
 +
-+            // Barrières : bandes verticales rouges et blanches (0 à 0,9 m)
-+            const wallPositions = [], wallUvs = [], wallIndices = []
-+            for(const line of grandTourIsland.barriers)
++            // Barrières : même forme et même matériau que la glissière du circuit (relevée sur sa géométrie) :
++            // poteaux plats de 0,3 m tous les 4 m (0 à 1,52 m) et lisse en V (0,75 → 0,99 → 1,28 m, creusée de 0,16 m côté piste)
 +            {
-+                const base = wallPositions.length / 3
-+                let along = 0
-+                for(let i = 0; i < line.length; i++)
++                const uvSample = railsMesh.geometry.attributes.uv
++                const railU = uvSample ? uvSample.getX(0) : 0.203, railV = uvSample ? uvSample.getY(0) : 0.5
++                const positions = [], uvs = []
++                const quad = (p0, p1, p2, p3) =>
 +                {
-+                    if(i > 0) along += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1])
-+                    wallPositions.push(line[i][0], 0, line[i][1], line[i][0], 0.9, line[i][1])
-+                    wallUvs.push(along / 2, 0, along / 2, 1)
++                    for(const v of [ p0, p1, p2, p1, p3, p2 ]) { positions.push(...v); uvs.push(railU, railV) }
 +                }
-+                for(let i = 0; i < line.length - 1; i++)
++                grandTourIsland.barriers.forEach((line, lineIndex) =>
 +                {
-+                    const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3
-+                    wallIndices.push(a, c, b, b, c, d)
-+                }
++                    // côté piste : à droite de la ligne pour la barrière gauche, à gauche pour la droite
++                    const inward = lineIndex === 0 ? -1 : 1
++                    const normals = line.map((point, i) =>
++                    {
++                        const a = line[Math.max(0, i - 1)], b = line[Math.min(line.length - 1, i + 1)]
++                        const dx = b[0] - a[0], dz = b[1] - a[1], length = Math.hypot(dx, dz) || 1
++                        return [ -dz / length * inward, dx / length * inward ]
++                    })
++                    let along = 0, nextPost = 2
++                    for(let i = 0; i < line.length - 1; i++)
++                    {
++                        const [ ax, az ] = line[i], [ bx, bz ] = line[i + 1]
++                        const [ anx, anz ] = normals[i], [ bnx, bnz ] = normals[i + 1]
++                        // lisse en V
++                        quad([ ax + anx * 0.16, 0.75, az + anz * 0.16 ], [ bx + bnx * 0.16, 0.75, bz + bnz * 0.16 ], [ ax, 0.99, az ], [ bx, 0.99, bz ])
++                        quad([ ax, 0.99, az ], [ bx, 0.99, bz ], [ ax + anx * 0.16, 1.28, az + anz * 0.16 ], [ bx + bnx * 0.16, 1.28, bz + bnz * 0.16 ])
++                        // poteaux
++                        const length = Math.hypot(bx - ax, bz - az)
++                        while(nextPost <= along + length)
++                        {
++                            const t = (nextPost - along) / (length || 1), dx = (bx - ax) / (length || 1), dz = (bz - az) / (length || 1)
++                            const x = ax + (bx - ax) * t, z = az + (bz - az) * t
++                            quad([ x - dx * 0.15, 0.01, z - dz * 0.15 ], [ x + dx * 0.15, 0.01, z + dz * 0.15 ], [ x - dx * 0.15, 1.52, z - dz * 0.15 ], [ x + dx * 0.15, 1.52, z + dz * 0.15 ])
++                            nextPost += 4
++                        }
++                        along += length
++                    }
++                })
++                const geometry = new THREE.BufferGeometry()
++                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
++                geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
++                geometry.computeVertexNormals()
++                geometry.computeBoundingSphere()
++                const walls = new THREE.Mesh(geometry, railsMesh.material)
++                walls.castShadow = true
++                walls.receiveShadow = true
++                island.add(walls)
 +            }
-+            const wallGeometry = new THREE.BufferGeometry()
-+            wallGeometry.setAttribute('position', new THREE.Float32BufferAttribute(wallPositions, 3))
-+            wallGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(wallUvs, 2))
-+            wallGeometry.setIndex(wallIndices)
-+            wallGeometry.computeVertexNormals()
-+            wallGeometry.computeBoundingSphere()
-+            const stripes = uv().x.fract().step(0.5)
-+            const wallMaterial = new MeshDefaultMaterial({
-+                colorNode: mix(color('#d8183c'), color('#f3eee8'), stripes),
-+                side: THREE.DoubleSide,
-+                hasWater: false
-+            })
-+            const walls = new THREE.Mesh(wallGeometry, wallMaterial)
-+            walls.castShadow = true
-+            walls.receiveShadow = true
-+            island.add(walls)
 +
-+            // Pas d'herbe sur la piste : masque du terrain (activé pendant le Grand tour)
++            // Terrain : pas d'herbe sur la piste (rouge du masque), trottoir dallé le long des barrières (vert du masque)
 +            {
 +                const terrain = this.game.terrain
 +                const size = terrain.grassMaskSize, data = terrain.grassMask.image.data
 +                const toPixel = (x, z) => [ (x / terrain.size + 0.5) * size, (z / terrain.size + 0.5) * size ]
-+                const widen = (a, b, extra) =>
-+                {
-+                    const dx = a[0] - b[0], dz = a[1] - b[1], length = Math.hypot(dx, dz) || 1
-+                    return [ a[0] + dx / length * extra, a[1] + dz / length * extra ]
-+                }
 +                const inside = (px, pz, quad) =>
 +                {
 +                    let sign = 0
@@ -3000,18 +3044,21 @@ index bb760e6..b046c8a 100644
 +                    }
 +                    return true
 +                }
-+                for(let i = 0; i < left.length - 1; i++)
++                const fill = (a, b, channel) =>
 +                {
-+                    const quad = [
-+                        toPixel(...widen(left[i], right[i], 0.8)), toPixel(...widen(right[i], left[i], 0.8)),
-+                        toPixel(...widen(right[i + 1], left[i + 1], 0.8)), toPixel(...widen(left[i + 1], right[i + 1], 0.8))
-+                    ]
-+                    const xs = quad.map(q => q[0]), zs = quad.map(q => q[1])
-+                    for(let pz = Math.max(0, Math.floor(Math.min(...zs))); pz <= Math.min(size - 1, Math.ceil(Math.max(...zs))); pz++)
-+                        for(let px = Math.max(0, Math.floor(Math.min(...xs))); px <= Math.min(size - 1, Math.ceil(Math.max(...xs))); px++)
-+                            if(inside(px + 0.5, pz + 0.5, quad))
-+                                data[(pz * size + px) * 4] = 255
++                    for(let i = 0; i < a.length - 1; i++)
++                    {
++                        const quad = [ toPixel(...a[i]), toPixel(...b[i]), toPixel(...b[i + 1]), toPixel(...a[i + 1]) ]
++                        const xs = quad.map(q => q[0]), zs = quad.map(q => q[1])
++                        for(let pz = Math.max(0, Math.floor(Math.min(...zs))); pz <= Math.min(size - 1, Math.ceil(Math.max(...zs))); pz++)
++                            for(let px = Math.max(0, Math.floor(Math.min(...xs))); px <= Math.min(size - 1, Math.ceil(Math.max(...xs))); px++)
++                                if(inside(px + 0.5, pz + 0.5, quad))
++                                    data[(pz * size + px) * 4 + channel] = 255
++                    }
 +                }
++                fill(grandTourIsland.sideLeft, grandTourIsland.sideRight, 0)   // herbe retirée sur toute la piste et ses trottoirs
++                fill(grandTourIsland.sideLeft, left, 1)                         // trottoir gauche
++                fill(right, grandTourIsland.sideRight, 1)                       // trottoir droit
 +                terrain.grassMask.needsUpdate = true
 +            }
 +
@@ -3020,6 +3067,10 @@ index bb760e6..b046c8a 100644
 +            island.applyMatrix4(railsMesh.matrixWorld.clone().invert())
 +            railsMesh.add(island)
 +            this.rails.island = island
++
++            // Obstacles de l'île (affichage tout de suite, physique au premier départ du Grand tour)
++            const obstacleMesh = this.obstacles.items[0].object.visual.object3D
++            this.tourObstacles = new TourObstacles(this.game, { group: island, materialSource: obstacleMesh.isMesh ? obstacleMesh : obstacleMesh.getObjectByProperty('isMesh', true) })
 +        }
 +
 +        this.rails.setCourse = (course) =>
@@ -3044,6 +3095,7 @@ index bb760e6..b046c8a 100644
 +                set(this.rails.islandRoad, isTour)
 +            if(this.rails.island)
 +                this.rails.island.visible = isTour
++            this.tourObstacles.setEnabled(isTour, bodyEnabled)
 +            this.game.terrain.grassMaskStrength.value = isTour ? 1 : 0
 +        }
 +
@@ -3053,9 +3105,16 @@ index bb760e6..b046c8a 100644
 +                this.rails.ensureTourCollider()
 +            this.rails.setCourse(this.course)
              this.game.objects.enable(this.rails.object)
++            if(this.course === 'tour')
++                this.tourObstacles.reset()
          }
          
-@@ -578,11 +973,243 @@ export class CircuitArea extends Area
+         this.rails.deactivate = () =>
+         {
+             this.game.objects.disable(this.rails.object)
++            this.tourObstacles.setEnabled(false, false)
+         }
+ 
          this.rails.deactivate()
      }
  
@@ -3302,7 +3361,7 @@ index bb760e6..b046c8a 100644
              InteractivePoints.ALIGN_RIGHT,
              InteractivePoints.STATE_CONCEALED,
              () =>
-@@ -592,7 +1219,7 @@ export class CircuitArea extends Area
+@@ -592,7 +1263,7 @@ export class CircuitArea extends Area
                  if(sound)
                      sound.play(true)
  
@@ -3311,7 +3370,7 @@ index bb760e6..b046c8a 100644
              },
              () =>
              {
-@@ -607,6 +1234,18 @@ export class CircuitArea extends Area
+@@ -607,6 +1278,18 @@ export class CircuitArea extends Area
                  this.game.inputs.interactiveButtons.removeItems(['interact'])
              }
          )
@@ -3330,7 +3389,7 @@ index bb760e6..b046c8a 100644
      }
  
      setStartAnimation()
-@@ -1348,11 +1987,15 @@ export class CircuitArea extends Area
+@@ -1348,11 +2031,15 @@ export class CircuitArea extends Area
          this.menu.inputFlag = new InputFlag(this.menu.inputGroup.querySelector('.js-input-flag'))
      }
  
@@ -3347,7 +3406,7 @@ index bb760e6..b046c8a 100644
          // Area frustum
          this.frustum.alwaysVisible = true
  
-@@ -1387,13 +2030,19 @@ export class CircuitArea extends Area
+@@ -1387,13 +2074,19 @@ export class CircuitArea extends Area
                  this.startPosition.rotation
              )
  
@@ -3371,7 +3430,7 @@ index bb760e6..b046c8a 100644
              // Starting lights
              this.startingLights.reset()
  
-@@ -1411,8 +2060,17 @@ export class CircuitArea extends Area
+@@ -1411,8 +2104,17 @@ export class CircuitArea extends Area
              // Objects
              this.resetObjects.reset()
  
@@ -3390,7 +3449,7 @@ index bb760e6..b046c8a 100644
  
              // Weather
              this.game.weather.override.start(
-@@ -1438,7 +2096,7 @@ export class CircuitArea extends Area
+@@ -1438,7 +2140,7 @@ export class CircuitArea extends Area
              // Timer
              this.timer.show()
  
@@ -3399,7 +3458,7 @@ index bb760e6..b046c8a 100644
              this.rails.activate()
  
              // Podium => Hide
-@@ -1525,6 +2183,9 @@ export class CircuitArea extends Area
+@@ -1525,6 +2227,9 @@ export class CircuitArea extends Area
          this.checkpoints.target = null
          this.checkpoints.doorTarget.mesh.visible = false
  
@@ -3409,7 +3468,7 @@ index bb760e6..b046c8a 100644
          // Sound
          if(!forced)
          {
-@@ -1545,6 +2206,20 @@ export class CircuitArea extends Area
+@@ -1545,6 +2250,20 @@ export class CircuitArea extends Area
                  // Menu buttons
                  this.menu.racingButtons.classList.remove('is-active')
  
@@ -3430,7 +3489,7 @@ index bb760e6..b046c8a 100644
                  // Interactive point
                  this.interactivePoint.show()
  
-@@ -1589,7 +2264,7 @@ export class CircuitArea extends Area
+@@ -1589,7 +2308,7 @@ export class CircuitArea extends Area
                  {
                      this.game.achievements.setProgress('circuitFinish', 1)
  
@@ -3439,7 +3498,7 @@ index bb760e6..b046c8a 100644
                          this.game.achievements.setProgress('circuitFinishFast', 1)
                  }
  
-@@ -1602,8 +2277,8 @@ export class CircuitArea extends Area
+@@ -1602,8 +2321,8 @@ export class CircuitArea extends Area
                      })
                  }
  
@@ -3450,7 +3509,7 @@ index bb760e6..b046c8a 100644
                  {
                      gsap.delayedCall(1, () =>
                      {
-@@ -1629,6 +2304,9 @@ export class CircuitArea extends Area
+@@ -1629,6 +2348,9 @@ export class CircuitArea extends Area
  
      update()
      {
@@ -3460,7 +3519,7 @@ index bb760e6..b046c8a 100644
          if(this.state === CircuitArea.STATE_RUNNING)
          {
              // Checkpoints
-@@ -1648,6 +2326,9 @@ export class CircuitArea extends Area
+@@ -1648,6 +2370,9 @@ export class CircuitArea extends Area
                      checkpoint.reach()
              }
  
@@ -3470,6 +3529,26 @@ index bb760e6..b046c8a 100644
              // Obstacles
              for(const obstacle of this.obstacles.items)
              {
+@@ -1658,6 +2383,8 @@ export class CircuitArea extends Area
+                 obstacle.object.physical.body.setNextKinematicTranslation(newPosition)
+                 obstacle.object.needsUpdate = true
+             }
++            if(this.course === 'tour')
++                this.tourObstacles.step(this.timer.elapsedTime)
+ 
+             // If out of bounds
+             if(this.game.player.position.y < this.bounds.threshold)
+@@ -1674,6 +2401,10 @@ export class CircuitArea extends Area
+             }
+         }
+ 
++        // Obstacles de l'île : affichage à la pose des corps
++        if(this.rails.island && this.rails.island.visible)
++            this.tourObstacles.syncVisuals()
++
+         // Banners
+         let i = 0
+         for(const banner of this.banners)
 diff --git a/sources/Game/World/ExplosiveCrates.js b/sources/Game/World/ExplosiveCrates.js
 index d6fd7e3..dda66cf 100644
 --- a/sources/Game/World/ExplosiveCrates.js
@@ -3776,6 +3855,382 @@ index 0000000..56aefef
 +        this.disabledObjects = []
 +    }
 +}
+diff --git a/sources/Game/World/TourObstacles.js b/sources/Game/World/TourObstacles.js
+new file mode 100644
+index 0000000..8d5eb46
+--- /dev/null
++++ b/sources/Game/World/TourObstacles.js
+@@ -0,0 +1,370 @@
++import * as THREE from 'three/webgpu'
++import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js'
++import { grandTourIsland } from '../../data/grandTour.js'
++
++/**
++ * Obstacles de la piste de l'île (Grand tour seulement).
++ *
++ * Positions données en abscisse curviligne s (mètres depuis le début de la piste de l'île, extension de 7 m comprise)
++ * et en décalage latéral o (mètres, > 0 vers la barrière gauche). Les formes suivent la courbure de la piste.
++ *
++ * - bosses (dos-d'âne) et tremplin + muret : colliders fixes, ajoutés au corps de la barrière du circuit
++ * - rétrécissements : blocs fixes partant des barrières
++ * - murs oscillants (comme la chicane du circuit) et barres tournantes : corps cinématiques
++ *
++ * Tout est déterministe : les corps mobiles ne dépendent que du chrono de la course (même règle que la chicane du circuit).
++ * La physique est créée au premier départ du Grand tour seulement : le Circuit garde exactement le même monde physique.
++ */
++export const TOUR_OBSTACLES = {
++    bumps: [
++        { s: [ 14, 17, 20, 23 ], length: 2.2, height: 0.25 },
++        { s: [ 178, 181, 184 ], length: 2.2, height: 0.25 },
++    ],
++    jumps: [
++        { s: 110, length: 5, height: 1.2, wallGap: 4, wallLength: 1, wallHeight: 0.6 },
++    ],
++    narrowings: [
++        { s: 60, length: 10, taper: 3, gap: 5.8 },
++        { s: 214, length: 10, taper: 3, gap: 5.8 },
++    ],
++    oscillatingWalls: [
++        { s: 42, phase: 0 },
++        { s: 49, phase: - 1 },
++        { s: 56, phase: - 2 },
++    ],
++    oscillation: { speed: 1.25, amplitude: 4.6 },
++    rotatingBars: [
++        { s: 160, speed: 1.2, phase: 0 },
++        { s: 267, speed: - 1.0, phase: 1.5 },
++    ],
++    bar: { halfLength: 4.8, halfHeight: 0.3, halfThickness: 0.25, y: 0.55, postRadius: 0.35, postHalfHeight: 0.8 },
++    // barrières physiques plus hautes autour des tremplins (pas de sortie de piste en vol)
++    jumpWallTop: 2.6,
++    jumpWallRadius: 22,
++}
++
++// couleurs de la palette (centres de texels, 128 de large)
++const RED = 66.5 / 128
++const WHITE = 70.5 / 128
++const ORANGE = 62.5 / 128
++
++export class TourObstacles
++{
++    constructor(game, { group, materialSource })
++    {
++        this.game = game
++        this.group = group
++        this.material = materialSource.material
++        this.obstacleGeometry = materialSource.geometry
++        this.ready = false
++        this.enabled = false
++        this.config = TOUR_OBSTACLES
++
++        this.setTrack()
++        this.setShapes()
++        this.setVisuals()
++    }
++
++    // Repère de la piste : centre, tangente, vecteur vers la gauche, demi-largeur physique, en fonction de s
++    setTrack()
++    {
++        const left = grandTourIsland.physLeft, right = grandTourIsland.physRight
++        this.centers = left.map((point, i) => [ (point[0] + right[i][0]) / 2, (point[1] + right[i][1]) / 2 ])
++        this.lengths = [ 0 ]
++        for(let i = 1; i < this.centers.length; i++)
++            this.lengths.push(this.lengths[i - 1] + Math.hypot(this.centers[i][0] - this.centers[i - 1][0], this.centers[i][1] - this.centers[i - 1][1]))
++
++        this.frameAt = (s) =>
++        {
++            let i = 0
++            while(i < this.lengths.length - 2 && this.lengths[i + 1] < s)
++                i++
++            const t = Math.min(1, Math.max(0, (s - this.lengths[i]) / ((this.lengths[i + 1] - this.lengths[i]) || 1)))
++            const lerp2 = (a, b) => [ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t ]
++            const center = lerp2(this.centers[i], this.centers[i + 1])
++            const leftPoint = lerp2(left[i], left[i + 1])
++            const dx = this.centers[i + 1][0] - this.centers[i][0], dz = this.centers[i + 1][1] - this.centers[i][1]
++            const length = Math.hypot(dx, dz) || 1
++            const lx = leftPoint[0] - center[0], lz = leftPoint[1] - center[1]
++            const halfWidth = Math.hypot(lx, lz) || 1
++            return { x: center[0], z: center[1], tx: dx / length, tz: dz / length, nx: lx / halfWidth, nz: lz / halfWidth, halfWidth }
++        }
++
++        // (s, o, y) → monde
++        this.toWorld = (s, o, y) =>
++        {
++            const f = this.frameAt(s)
++            return [ f.x + f.nx * o, y, f.z + f.nz * o ]
++        }
++    }
++
++    // Formes fixes : listes de sommets (monde) d'enveloppes convexes, avec leur couleur
++    setShapes()
++    {
++        const c = this.config
++        this.solids = []
++
++        const across = (s0, profile, color, edge = 6.6) =>
++        {
++            // profil [ [ds, y], ... ] extrudé sur toute la largeur
++            const points = []
++            for(const o of [ - edge, edge ])
++                for(const [ ds, y ] of profile)
++                    points.push(this.toWorld(s0 + ds, o, y))
++            this.solids.push({ points, color, kind: 'road' })
++        }
++
++        // Bosses : arc de sinus
++        for(const series of c.bumps)
++            series.s.forEach((s, n) =>
++            {
++                const profile = []
++                for(let k = 0; k <= 6; k++)
++                    profile.push([ series.length * k / 6, Math.sin(Math.PI * k / 6) * series.height + 0.02 ])
++                profile.push([ 0, 0 ], [ series.length, 0 ])
++                across(s - series.length / 2, profile, n % 2 ? WHITE : RED)
++            })
++
++        // Tremplin (pente puis face verticale) et muret à franchir en vol
++        for(const jump of c.jumps)
++        {
++            across(jump.s, [ [ 0, 0 ], [ 0, 0.02 ], [ jump.length, jump.height ], [ jump.length, 0 ] ], RED)
++            const w0 = jump.s + jump.length + jump.wallGap
++            across(w0, [ [ 0, 0 ], [ 0, jump.wallHeight ], [ jump.wallLength, jump.wallHeight ], [ jump.wallLength, 0 ] ], WHITE)
++        }
++
++        // Rétrécissements : un bloc de chaque côté, en biseau aux deux bouts
++        for(const narrowing of c.narrowings)
++            for(const side of [ 1, - 1 ])
++            {
++                const points = []
++                const edge = 6.8, inner = narrowing.gap / 2
++                const footprint = [ [ 0, edge ], [ narrowing.taper, inner ], [ narrowing.length - narrowing.taper, inner ], [ narrowing.length, edge ] ]
++                // découpé en 3 tronçons convexes (la piste peut tourner un peu)
++                for(let part = 0; part < 3; part++)
++                {
++                    const a = footprint[part], b = footprint[part + 1]
++                    const partPoints = []
++                    for(const [ ds, o ] of [ a, b, [ a[0], edge ], [ b[0], edge ] ])
++                        for(const y of [ 0, 1.0 ])
++                            partPoints.push(this.toWorld(narrowing.s + ds, o * side, y))
++                    this.solids.push({ points: partPoints, color: part === 1 ? WHITE : RED, kind: 'block' })
++                }
++            }
++
++        this.jumpCenters = c.jumps.map((jump) => this.frameAt(jump.s + jump.length + jump.wallGap))
++    }
++
++    // Hauteur des barrières physiques de l'île en (x, z)
++    wallTopAt(x, z, defaultTop)
++    {
++        for(const center of this.jumpCenters)
++            if(Math.hypot(x - center.x, z - center.z) < this.config.jumpWallRadius)
++                return this.config.jumpWallTop
++        return defaultTop
++    }
++
++    paint(geometry, u)
++    {
++        const count = geometry.attributes.position.count
++        const uvs = new Float32Array(count * 2)
++        for(let i = 0; i < count; i++)
++        {
++            uvs[i * 2] = u
++            uvs[i * 2 + 1] = 0.5
++        }
++        geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
++        geometry.computeBoundingSphere()
++        return geometry
++    }
++
++    addMesh(geometry)
++    {
++        const mesh = new THREE.Mesh(geometry, this.material)
++        mesh.castShadow = true
++        mesh.receiveShadow = true
++        this.group.add(mesh)
++        return mesh
++    }
++
++    setVisuals()
++    {
++        const c = this.config
++
++        // Formes fixes
++        for(const solid of this.solids)
++            this.addMesh(this.paint(new ConvexGeometry(solid.points.map((p) => new THREE.Vector3(...p))), solid.color))
++
++        // Murs oscillants : même bloc que la chicane du circuit, orienté selon la piste
++        this.walls = c.oscillatingWalls.map((wall) =>
++        {
++            const frame = this.frameAt(wall.s)
++            const mesh = this.addMesh(this.obstacleGeometry)
++            const angle = Math.atan2(- frame.tz, frame.tx)
++            return { ...wall, frame, angle, mesh, body: null }
++        })
++
++        // Barres tournantes : bras + poteau central
++        const bar = c.bar
++        const barGeometry = this.paint(new THREE.BoxGeometry(bar.halfLength * 2, bar.halfHeight * 2, bar.halfThickness * 2).translate(0, bar.y, 0).toNonIndexed(), ORANGE)
++        const postGeometry = this.paint(new THREE.CylinderGeometry(bar.postRadius, bar.postRadius, bar.postHalfHeight * 2, 12).translate(0, bar.postHalfHeight, 0).toNonIndexed(), WHITE)
++        this.bars = c.rotatingBars.map((item) =>
++        {
++            const frame = this.frameAt(item.s)
++            const mesh = new THREE.Group()
++            mesh.add(this.addMesh(barGeometry), this.addMesh(postGeometry))
++            this.group.add(mesh)
++            return { ...item, frame, mesh, body: null }
++        })
++
++        this.poseAt(0)
++        this.syncVisuals()
++    }
++
++    // Pose des corps mobiles au temps t (chrono de la course)
++    wallPose(wall, t)
++    {
++        const offset = Math.sin(t * this.config.oscillation.speed + wall.phase) * this.config.oscillation.amplitude
++        return {
++            position: { x: wall.frame.x + wall.frame.nx * offset, y: 1.0, z: wall.frame.z + wall.frame.nz * offset },
++            rotation: { x: 0, y: Math.sin(wall.angle / 2), z: 0, w: Math.cos(wall.angle / 2) },
++        }
++    }
++
++    barPose(bar, t)
++    {
++        const angle = Math.atan2(- bar.frame.tz, bar.frame.tx) + Math.PI / 2 + bar.phase + t * bar.speed
++        return {
++            position: { x: bar.frame.x, y: 0, z: bar.frame.z },
++            rotation: { x: 0, y: Math.sin(angle / 2), z: 0, w: Math.cos(angle / 2) },
++        }
++    }
++
++    // Physique : appelé au premier départ du Grand tour
++    createPhysics({ staticBody, roadCollider, obstacleCollider })
++    {
++        if(this.ready)
++            return
++        const RAPIER = this.game.RAPIER
++        const world = this.game.physics.world
++        const bodyPosition = staticBody.translation()
++
++        this.colliders = []
++        for(const solid of this.solids)
++        {
++            const flat = new Float32Array(solid.points.flatMap(([ x, y, z ]) => [ x - bodyPosition.x, y - bodyPosition.y, z - bodyPosition.z ]))
++            const reference = solid.kind === 'road' ? roadCollider : obstacleCollider
++            const description = RAPIER.ColliderDesc.convexHull(flat)
++                .setFriction(reference.friction())
++                .setFrictionCombineRule(reference.frictionCombineRule())
++                .setRestitution(reference.restitution())
++                .setCollisionGroups(reference.collisionGroups())
++            this.colliders.push(world.createCollider(description, staticBody))
++        }
++
++        const dynamicCollider = (description) => description
++            .setFriction(obstacleCollider.friction())
++            .setFrictionCombineRule(obstacleCollider.frictionCombineRule())
++            .setRestitution(obstacleCollider.restitution())
++            .setCollisionGroups(obstacleCollider.collisionGroups())
++
++        for(const wall of this.walls)
++        {
++            const pose = this.wallPose(wall, 0)
++            wall.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setCanSleep(false).setTranslation(pose.position.x, pose.position.y, pose.position.z).setRotation(pose.rotation))
++            world.createCollider(dynamicCollider(RAPIER.ColliderDesc.cuboid(0.4228, 0.925, 0.85)), wall.body)
++        }
++
++        const bar = this.config.bar
++        for(const item of this.bars)
++        {
++            const pose = this.barPose(item, 0)
++            item.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setCanSleep(false).setTranslation(pose.position.x, pose.position.y, pose.position.z).setRotation(pose.rotation))
++            world.createCollider(dynamicCollider(RAPIER.ColliderDesc.cuboid(bar.halfLength, bar.halfHeight, bar.halfThickness).setTranslation(0, bar.y, 0)), item.body)
++            world.createCollider(dynamicCollider(RAPIER.ColliderDesc.cylinder(bar.postHalfHeight, bar.postRadius).setTranslation(0, bar.postHalfHeight, 0)), item.body)
++        }
++
++        this.ready = true
++        this.enabled = true
++        this.setEnabled(false)
++    }
++
++    get bodies()
++    {
++        return [ ...this.walls, ...this.bars ].map((item) => item.body).filter(Boolean)
++    }
++
++    // Les colliders fixes suivent le corps de la barrière (activé / désactivé avec elle) ; on ne les règle que pour le Circuit
++    setEnabled(enabled, staticBodyEnabled = true)
++    {
++        if(!this.ready)
++            return
++        for(const collider of this.colliders)
++            if(!staticBodyEnabled || collider.isEnabled() !== enabled)
++                collider.setEnabled(enabled)
++        for(const body of this.bodies)
++            if(body.isEnabled() !== enabled)
++                body.setEnabled(enabled)
++        this.enabled = enabled
++    }
++
++    // Départ : corps mobiles à leur pose de départ (téléportés)
++    reset()
++    {
++        if(!this.ready)
++            return
++        for(const wall of this.walls)
++        {
++            const pose = this.wallPose(wall, 0)
++            wall.body.setTranslation(pose.position, true)
++            wall.body.setRotation(pose.rotation, true)
++        }
++        for(const item of this.bars)
++        {
++            const pose = this.barPose(item, 0)
++            item.body.setTranslation(pose.position, true)
++            item.body.setRotation(pose.rotation, true)
++        }
++        this.syncVisuals()
++    }
++
++    // Course en cours : prochaine pose des corps mobiles
++    step(t)
++    {
++        if(!this.ready)
++            return
++        for(const wall of this.walls)
++        {
++            const pose = this.wallPose(wall, t)
++            wall.body.setNextKinematicTranslation(pose.position)
++            wall.body.setNextKinematicRotation(pose.rotation)
++        }
++        for(const item of this.bars)
++        {
++            const pose = this.barPose(item, t)
++            item.body.setNextKinematicTranslation(pose.position)
++            item.body.setNextKinematicRotation(pose.rotation)
++        }
++    }
++
++    // Affichage : pose réelle des corps (savestates compris), ou pose de départ si la physique n'existe pas encore
++    poseAt(t)
++    {
++        this.visualPoses = [
++            ...this.walls.map((wall) => this.wallPose(wall, t)),
++            ...this.bars.map((item) => this.barPose(item, t)),
++        ]
++    }
++
++    syncVisuals()
++    {
++        const items = [ ...this.walls, ...this.bars ]
++        items.forEach((item, i) =>
++        {
++            const position = item.body ? item.body.translation() : this.visualPoses[i].position
++            const rotation = item.body ? item.body.rotation() : this.visualPoses[i].rotation
++            item.mesh.position.set(position.x, position.y, position.z)
++            item.mesh.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w)
++        })
++    }
++}
 diff --git a/sources/Game/World/World.js b/sources/Game/World/World.js
 index ae36e16..c28f54d 100644
 --- a/sources/Game/World/World.js
@@ -3795,10 +4250,10 @@ index ae36e16..c28f54d 100644
          {
 diff --git a/sources/data/grandTour.js b/sources/data/grandTour.js
 new file mode 100644
-index 0000000..142fb0d
+index 0000000..0dd5bc5
 --- /dev/null
 +++ b/sources/data/grandTour.js
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,55 @@
 +/**
 + * Grand tour (tracé B, depuis 1.5.0) : un tour complet du circuit avec ses barrières (portes 0 à 7),
 + * sortie par une ouverture juste après la porte 7, puis une piste de l'île bordée de barrières
@@ -3829,13 +4284,19 @@ index 0000000..142fb0d
 +// Pendant le Grand tour : on ne renvoie au dernier checkpoint que dans l'eau profonde
 +export const grandTourOutOfBoundsY = -1.0
 +
-+// Piste de l'île : bords de la route (left/right, même nombre de points) et barrières (polylignes)
++// Piste de l'île (mêmes nombres de points pour road*, phys*, side*, kerb*) : route physique (phys), asphalte affiché (road),
++// vibreurs (kerbLeft/kerbRight = bord intérieur, kerbFlags = 1 dans les virages), trottoir dallé (side), barrières (polylignes)
 +export const grandTourIsland = {
 +    width: 12.0,
-+    roadLeft: [ [-32.20, 72.52], [-31.20, 72.59], [-30.20, 72.66], [-29.20, 72.74], [-28.21, 72.81], [-27.21, 72.89], [-26.21, 72.96], [-25.22, 73.03], [-24.22, 73.11], [-23.22, 73.18], [-22.22, 73.25], [-21.23, 73.33], [-20.23, 73.40], [-19.23, 73.48], [-18.23, 73.55], [-17.24, 73.62], [-16.24, 73.70], [-15.24, 73.77], [-14.25, 73.85], [-13.25, 73.92], [-12.25, 73.99], [-11.15, 74.07], [-9.97, 74.12], [-8.80, 74.14], [-7.63, 74.13], [-6.47, 74.08], [-5.32, 74.01], [-4.19, 73.91], [-3.06, 73.79], [-1.94, 73.64], [-0.83, 73.48], [0.28, 73.29], [1.37, 73.09], [2.45, 72.86], [3.52, 72.62], [4.59, 72.37], [5.64, 72.10], [6.69, 71.82], [7.73, 71.52], [8.76, 71.21], [9.79, 70.89], [10.82, 70.56], [11.83, 70.22], [12.83, 69.87], [13.83, 69.51], [14.83, 69.14], [15.82, 68.76], [16.80, 68.37], [17.78, 67.98], [18.75, 67.58], [19.72, 67.17], [20.69, 66.75], [21.64, 66.33], [22.59, 65.90], [23.55, 65.46], [24.49, 65.02], [25.42, 64.58], [26.31, 64.15], [27.16, 63.75], [28.02, 63.36], [28.88, 62.97], [29.72, 62.61], [30.57, 62.25], [31.43, 61.90], [32.29, 61.57], [33.14, 61.25], [33.98, 60.95], [34.81, 60.67], [35.65, 60.40], [36.47, 60.16], [37.29, 59.94], [38.10, 59.74], [38.88, 59.58], [39.64, 59.44], [40.37, 59.35], [41.07, 59.28], [41.73, 59.25], [42.30, 59.26], [42.81, 59.31], [43.22, 59.38], [43.50, 59.46], [43.69, 59.53], [43.80, 59.59], [43.85, 59.64], [43.97, 59.77], [44.39, 60.36], [45.10, 61.29], [45.87, 62.22], [46.68, 63.15], [47.58, 64.08], [48.57, 65.01], [49.68, 65.94], [50.98, 66.85], [52.52, 67.70], [54.39, 68.42], [56.61, 68.83], [58.88, 68.78], [60.67, 68.41], [62.06, 67.99], [63.37, 67.51], [64.60, 66.96], [65.77, 66.37], [66.87, 65.74], [67.93, 65.08], [68.94, 64.41], [69.90, 63.71], [70.96, 62.90], [72.18, 61.79], [73.32, 60.48], [74.23, 59.17], [74.97, 57.89], [75.59, 56.63], [76.10, 55.41], [76.54, 54.21], [76.92, 53.02], [77.24, 51.87], [77.52, 50.72], [77.77, 49.59], [77.99, 48.48], [78.18, 47.37], [78.35, 46.27], [78.50, 45.18], [78.64, 44.10], [78.76, 43.02], [78.86, 41.95], [78.95, 40.88], [79.03, 39.82], [79.09, 38.78], [79.15, 37.75], [79.21, 36.72], [79.26, 35.68], [79.30, 34.63], [79.34, 33.58], [79.36, 32.52], [79.38, 31.45], [79.38, 30.37], [79.37, 29.28], [79.34, 28.16], [79.29, 27.02], [79.20, 25.84], [79.07, 24.59], [78.85, 23.23], [78.47, 21.62], [77.65, 19.55], [76.74, 18.19], [76.44, 17.72], [76.18, 17.21], [75.87, 16.52], [75.54, 15.76], [75.22, 14.94], [74.90, 14.09], [74.59, 13.23], [74.28, 12.34], [73.98, 11.45], [73.68, 10.54], [73.39, 9.63], [73.10, 8.71], [72.81, 7.78], [72.53, 6.85], [72.25, 5.92], [71.96, 4.94], [71.64, 3.90], [71.30, 2.84], [70.93, 1.79], [70.55, 0.74], [70.13, -0.32], [69.70, -1.37], [69.24, -2.42], [68.74, -3.47], [68.22, -4.51], [67.66, -5.55], [67.07, -6.58], [66.43, -7.60], [65.76, -8.62], [65.04, -9.61], [64.28, -10.60], [63.46, -11.57], [62.60, -12.50], [61.68, -13.42], [60.71, -14.30], [59.68, -15.13], [58.68, -15.86], [57.80, -16.47], [57.01, -17.03], [56.22, -17.59], [55.43, -18.15], [54.64, -18.72], [53.86, -19.29], [53.08, -19.87], [52.30, -20.45], [51.52, -21.03], [50.75, -21.62], [49.98, -22.21], [49.21, -22.80], [48.45, -23.40], [47.69, -24.00], [46.93, -24.60], [46.17, -25.21], [45.41, -25.82], [44.52, -26.55], [43.30, -27.44], [41.74, -28.33], [39.79, -29.09], [37.44, -29.50], [34.85, -29.32], [32.43, -28.50], [30.48, -27.30], [29.00, -25.96], [27.90, -24.65], [27.02, -23.37], [26.31, -22.13], [25.71, -20.95], [25.20, -19.79], [24.75, -18.65], [24.34, -17.53], [23.98, -16.43], [23.66, -15.36], [23.36, -14.33], [23.07, -13.30], [22.80, -12.27], [22.53, -11.23], [22.28, -10.19], [22.04, -9.14], [21.81, -8.08], [21.59, -7.01], [21.39, -5.94], [21.21, -4.86], [21.04, -3.77], [20.88, -2.68], [20.75, -1.57], [20.64, -0.46], [20.54, 0.66], [20.47, 1.79], [20.42, 2.93], [20.40, 4.09], [20.41, 5.24], [20.45, 6.42], [20.52, 7.59], [20.63, 8.78], [20.76, 9.83], [20.85, 10.64], [20.89, 11.31], [20.89, 11.94], [20.86, 12.50], [20.80, 12.98], [20.71, 13.37], [20.62, 13.65], [20.53, 13.85], [20.45, 13.98], [20.38, 14.07], [20.26, 14.16], [20.09, 14.27], [19.83, 14.40], [19.26, 14.61], [18.28, 14.96], [17.14, 15.41], [16.03, 15.89], [14.94, 16.41], [13.86, 16.97], [12.80, 17.56], [11.77, 18.19], [10.76, 18.85], [9.78, 19.53], [8.83, 20.25], [7.89, 20.99], [6.99, 21.75], [6.11, 22.53], [5.27, 23.33], [4.54, 24.05], [3.90, 24.67], [3.27, 25.25], [2.64, 25.80], [2.02, 26.31], [1.40, 26.80], [0.79, 27.23], [0.19, 27.63], [-0.38, 27.96], [-0.91, 28.23], [-1.39, 28.44], [-1.84, 28.59], [-2.54, 28.76], [-3.49, 28.98], [-4.46, 29.21], [-5.43, 29.44], [-6.19, 29.62], [-7.17, 29.85], [-8.14, 30.08], [-9.11, 30.30], [-10.09, 30.53], [-11.06, 30.76], [-12.03, 30.99], [-13.01, 31.22] ],
-+    roadRight: [ [-31.27, 59.95], [-30.27, 60.02], [-29.27, 60.10], [-28.27, 60.17], [-27.28, 60.25], [-26.28, 60.32], [-25.28, 60.39], [-24.28, 60.47], [-23.29, 60.54], [-22.29, 60.61], [-21.29, 60.69], [-20.30, 60.76], [-19.30, 60.84], [-18.30, 60.91], [-17.30, 60.98], [-16.31, 61.06], [-15.31, 61.13], [-14.31, 61.21], [-13.31, 61.28], [-12.32, 61.35], [-11.32, 61.43], [-10.42, 61.49], [-9.61, 61.53], [-8.78, 61.54], [-7.95, 61.53], [-7.11, 61.50], [-6.26, 61.45], [-5.41, 61.37], [-4.55, 61.28], [-3.68, 61.17], [-2.82, 61.04], [-1.95, 60.89], [-1.07, 60.72], [-0.20, 60.54], [0.68, 60.35], [1.56, 60.14], [2.45, 59.91], [3.33, 59.67], [4.21, 59.42], [5.10, 59.16], [5.97, 58.89], [6.85, 58.60], [7.74, 58.30], [8.62, 57.99], [9.50, 57.67], [10.38, 57.35], [11.26, 57.01], [12.13, 56.67], [13.02, 56.31], [13.89, 55.95], [14.76, 55.58], [15.63, 55.21], [16.51, 54.82], [17.38, 54.43], [18.25, 54.03], [19.11, 53.62], [19.99, 53.21], [20.90, 52.77], [21.87, 52.32], [22.82, 51.88], [23.79, 51.45], [24.78, 51.02], [25.77, 50.60], [26.77, 50.20], [27.78, 49.80], [28.80, 49.42], [29.84, 49.05], [30.90, 48.69], [31.97, 48.35], [33.06, 48.03], [34.18, 47.73], [35.32, 47.45], [36.49, 47.21], [37.70, 46.99], [38.95, 46.83], [40.24, 46.71], [41.58, 46.65], [43.01, 46.68], [44.49, 46.82], [46.05, 47.10], [47.69, 47.57], [49.34, 48.27], [50.96, 49.22], [52.46, 50.43], [53.70, 51.76], [54.46, 52.79], [54.96, 53.44], [55.47, 54.06], [55.97, 54.63], [56.46, 55.14], [56.93, 55.59], [57.35, 55.94], [57.69, 56.18], [57.89, 56.30], [57.89, 56.31], [57.63, 56.28], [57.34, 56.27], [57.51, 56.21], [58.04, 56.05], [58.60, 55.84], [59.19, 55.58], [59.81, 55.26], [60.44, 54.91], [61.09, 54.50], [61.74, 54.07], [62.39, 53.59], [62.93, 53.19], [63.19, 52.96], [63.36, 52.76], [63.59, 52.43], [63.85, 51.98], [64.11, 51.44], [64.37, 50.82], [64.61, 50.14], [64.84, 49.42], [65.06, 48.65], [65.26, 47.85], [65.43, 47.03], [65.60, 46.18], [65.75, 45.32], [65.89, 44.44], [66.01, 43.55], [66.12, 42.65], [66.22, 41.74], [66.31, 40.82], [66.39, 39.89], [66.46, 38.96], [66.52, 38.00], [66.58, 37.04], [66.63, 36.07], [66.67, 35.12], [66.71, 34.16], [66.74, 33.22], [66.77, 32.27], [66.78, 31.34], [66.78, 30.42], [66.77, 29.52], [66.75, 28.63], [66.71, 27.78], [66.65, 26.97], [66.57, 26.22], [66.48, 25.61], [66.41, 25.27], [66.53, 25.48], [66.28, 25.21], [65.51, 23.99], [64.85, 22.73], [64.33, 21.60], [63.88, 20.52], [63.47, 19.48], [63.08, 18.45], [62.71, 17.44], [62.36, 16.43], [62.03, 15.43], [61.70, 14.44], [61.38, 13.45], [61.07, 12.46], [60.77, 11.48], [60.47, 10.49], [60.17, 9.51], [59.90, 8.57], [59.63, 7.70], [59.35, 6.86], [59.06, 6.02], [58.76, 5.19], [58.45, 4.39], [58.11, 3.59], [57.77, 2.81], [57.41, 2.05], [57.04, 1.30], [56.65, 0.58], [56.25, -0.12], [55.83, -0.80], [55.39, -1.45], [54.94, -2.08], [54.48, -2.67], [54.01, -3.23], [53.52, -3.77], [53.02, -4.27], [52.51, -4.73], [51.98, -5.16], [51.37, -5.60], [50.60, -6.13], [49.76, -6.72], [48.92, -7.32], [48.08, -7.92], [47.24, -8.52], [46.41, -9.13], [45.58, -9.74], [44.75, -10.36], [43.93, -10.97], [43.11, -11.60], [42.29, -12.22], [41.48, -12.85], [40.67, -13.49], [39.86, -14.12], [39.06, -14.76], [38.25, -15.41], [37.46, -16.06], [36.80, -16.59], [36.41, -16.89], [36.24, -17.00], [36.33, -16.98], [36.73, -16.92], [37.33, -16.97], [37.86, -17.14], [38.12, -17.28], [38.12, -17.27], [37.95, -17.05], [37.70, -16.68], [37.41, -16.18], [37.11, -15.58], [36.82, -14.91], [36.53, -14.19], [36.26, -13.43], [35.99, -12.62], [35.74, -11.78], [35.48, -10.89], [35.23, -9.99], [34.99, -9.09], [34.76, -8.19], [34.54, -7.29], [34.34, -6.39], [34.14, -5.50], [33.96, -4.60], [33.79, -3.71], [33.64, -2.82], [33.50, -1.93], [33.38, -1.04], [33.27, -0.16], [33.18, 0.71], [33.11, 1.58], [33.05, 2.45], [33.02, 3.31], [33.00, 4.15], [33.01, 5.00], [33.04, 5.82], [33.09, 6.65], [33.16, 7.45], [33.27, 8.38], [33.40, 9.56], [33.48, 10.88], [33.49, 12.26], [33.41, 13.69], [33.20, 15.19], [32.85, 16.75], [32.31, 18.36], [31.54, 19.98], [30.54, 21.53], [29.31, 22.95], [27.92, 24.17], [26.43, 25.17], [24.90, 25.94], [23.60, 26.44], [22.70, 26.76], [21.97, 27.04], [21.26, 27.36], [20.54, 27.69], [19.85, 28.06], [19.16, 28.44], [18.48, 28.85], [17.81, 29.29], [17.15, 29.75], [16.51, 30.23], [15.87, 30.74], [15.25, 31.26], [14.64, 31.81], [14.02, 32.39], [13.33, 33.07], [12.54, 33.84], [11.69, 34.62], [10.81, 35.39], [9.90, 36.15], [8.94, 36.89], [7.92, 37.62], [6.85, 38.32], [5.69, 39.00], [4.44, 39.64], [3.09, 40.22], [1.64, 40.70], [0.40, 41.01], [-0.60, 41.25], [-1.57, 41.47], [-2.55, 41.70], [-3.31, 41.88], [-4.28, 42.11], [-5.25, 42.34], [-6.23, 42.57], [-7.20, 42.80], [-8.17, 43.03], [-9.15, 43.26], [-10.12, 43.49] ],
-+    kerbLeft: [ [-32.20, 72.52], [-31.20, 72.59], [-30.20, 72.66], [-29.20, 72.74], [-28.21, 72.81], [-27.21, 72.89], [-26.21, 72.96], [-25.10, 71.54], [-24.11, 71.61], [-23.11, 71.68], [-22.11, 71.76], [-21.12, 71.83], [-20.12, 71.91], [-19.12, 71.98], [-18.12, 72.05], [-17.13, 72.13], [-16.13, 72.20], [-15.13, 72.28], [-14.13, 72.35], [-13.14, 72.42], [-12.14, 72.50], [-11.07, 72.58], [-9.93, 72.62], [-8.80, 72.64], [-7.67, 72.63], [-6.55, 72.58], [-5.44, 72.52], [-4.33, 72.42], [-3.23, 72.30], [-2.14, 72.16], [-1.06, 72.00], [0.01, 71.81], [1.08, 71.61], [2.13, 71.40], [3.18, 71.16], [4.23, 70.91], [5.26, 70.65], [6.29, 70.37], [7.31, 70.08], [8.33, 69.78], [9.34, 69.46], [10.35, 69.14], [11.34, 68.80], [12.33, 68.45], [13.32, 68.10], [14.30, 67.74], [15.28, 67.36], [16.25, 66.98], [17.21, 66.59], [18.17, 66.19], [19.13, 65.79], [20.08, 65.37], [21.03, 64.96], [21.97, 64.53], [22.91, 64.10], [23.85, 63.66], [24.78, 63.22], [25.66, 62.79], [26.53, 62.39], [27.40, 61.99], [28.27, 61.60], [29.13, 61.23], [30.00, 60.86], [30.88, 60.51], [31.75, 60.17], [32.62, 59.84], [33.48, 59.53], [34.35, 59.24], [35.21, 58.97], [36.07, 58.71], [36.92, 58.49], [37.77, 58.28], [38.60, 58.10], [39.41, 57.96], [40.20, 57.85], [40.97, 57.78], [41.71, 57.75], [42.38, 57.76], [43.01, 57.82], [43.56, 57.92], [44.00, 58.04], [44.36, 58.19], [44.65, 58.36], [44.88, 58.54], [45.13, 58.82], [45.59, 59.46], [46.28, 60.36], [47.01, 61.25], [47.79, 62.13], [48.64, 63.02], [49.56, 63.89], [50.59, 64.75], [51.78, 65.58], [53.16, 66.35], [54.80, 66.98], [56.73, 67.34], [58.70, 67.29], [60.29, 66.96], [61.58, 66.57], [62.80, 66.12], [63.96, 65.60], [65.06, 65.05], [66.11, 64.45], [67.11, 63.83], [68.08, 63.18], [69.01, 62.51], [70.00, 61.74], [71.11, 60.74], [72.14, 59.56], [72.97, 58.37], [73.65, 57.19], [74.22, 56.01], [74.70, 54.86], [75.12, 53.72], [75.48, 52.59], [75.79, 51.48], [76.06, 50.38], [76.30, 49.29], [76.52, 48.21], [76.70, 47.13], [76.87, 46.05], [77.02, 44.99], [77.15, 43.93], [77.26, 42.87], [77.37, 41.81], [77.45, 40.76], [77.53, 39.72], [77.60, 38.69], [77.66, 37.67], [77.71, 36.64], [77.76, 35.61], [77.80, 34.58], [77.84, 33.54], [77.86, 32.49], [77.88, 31.44], [77.88, 30.38], [77.87, 29.31], [77.84, 28.22], [77.79, 27.11], [77.71, 25.97], [77.58, 24.79], [77.38, 23.51], [77.04, 22.05], [76.32, 20.25], [75.50, 19.03], [75.14, 18.47], [74.83, 17.86], [74.49, 17.13], [74.16, 16.32], [73.82, 15.48], [73.50, 14.61], [73.18, 13.73], [72.86, 12.83], [72.56, 11.92], [72.25, 11.00], [71.96, 10.08], [71.67, 9.15], [71.38, 8.22], [71.09, 7.29], [70.81, 6.35], [70.52, 5.37], [70.21, 4.35], [69.87, 3.32], [69.52, 2.29], [69.14, 1.27], [68.74, 0.24], [68.32, -0.78], [67.87, -1.80], [67.39, -2.81], [66.89, -3.82], [66.35, -4.82], [65.78, -5.81], [65.17, -6.79], [64.52, -7.76], [63.84, -8.72], [63.11, -9.66], [62.33, -10.58], [61.52, -11.46], [60.65, -12.33], [59.73, -13.16], [58.76, -13.94], [57.81, -14.64], [56.95, -15.24], [56.15, -15.80], [55.35, -16.37], [54.55, -16.93], [53.76, -17.51], [52.97, -18.08], [52.19, -18.66], [51.40, -19.24], [50.62, -19.83], [49.84, -20.42], [49.07, -21.02], [48.29, -21.62], [47.52, -22.22], [46.75, -22.82], [45.99, -23.43], [45.23, -24.04], [44.47, -24.66], [43.60, -25.37], [42.48, -26.18], [41.09, -26.98], [39.38, -27.65], [37.35, -28.00], [35.14, -27.85], [33.07, -27.15], [31.39, -26.11], [30.09, -24.93], [29.09, -23.74], [28.29, -22.57], [27.63, -21.42], [27.07, -20.31], [26.58, -19.21], [26.15, -18.12], [25.76, -17.04], [25.41, -15.98], [25.10, -14.94], [24.80, -13.92], [24.52, -12.91], [24.25, -11.89], [23.99, -10.87], [23.74, -9.84], [23.50, -8.81], [23.28, -7.77], [23.07, -6.72], [22.87, -5.68], [22.69, -4.62], [22.52, -3.55], [22.37, -2.48], [22.24, -1.40], [22.13, -0.32], [22.04, 0.77], [21.97, 1.87], [21.92, 2.98], [21.90, 4.09], [21.91, 5.21], [21.95, 6.35], [22.02, 7.48], [22.12, 8.62], [22.25, 9.66], [22.34, 10.51], [22.39, 11.26], [22.39, 11.98], [22.36, 12.64], [22.28, 13.24], [22.16, 13.77], [22.01, 14.21], [21.84, 14.58], [21.65, 14.88], [21.44, 15.12], [21.17, 15.35], [20.85, 15.57], [20.44, 15.77], [19.78, 16.02], [18.81, 16.36], [17.72, 16.79], [16.65, 17.26], [15.60, 17.76], [14.57, 18.29], [13.56, 18.86], [12.57, 19.46], [11.60, 20.09], [10.66, 20.75], [9.74, 21.43], [8.84, 22.15], [7.97, 22.88], [7.13, 23.64], [6.31, 24.41], [5.58, 25.13], [4.92, 25.76], [4.27, 26.36], [3.62, 26.94], [2.96, 27.48], [2.30, 28.00], [1.64, 28.47], [0.98, 28.90], [0.35, 29.28], [-0.27, 29.59], [-0.85, 29.84], [-1.43, 30.03], [-2.19, 30.22], [-3.14, 30.44], [-4.12, 30.67], [-5.09, 30.90], [-5.85, 31.08], [-7.17, 29.85], [-8.14, 30.08], [-9.11, 30.30], [-10.09, 30.53], [-11.06, 30.76], [-12.03, 30.99], [-13.01, 31.22] ],
-+    kerbRight: [ [-31.27, 59.95], [-30.27, 60.02], [-29.27, 60.10], [-28.27, 60.17], [-27.28, 60.25], [-26.28, 60.32], [-25.28, 60.39], [-24.40, 61.96], [-23.40, 62.04], [-22.40, 62.11], [-21.40, 62.18], [-20.41, 62.26], [-19.41, 62.33], [-18.41, 62.41], [-17.41, 62.48], [-16.42, 62.55], [-15.42, 62.63], [-14.42, 62.70], [-13.43, 62.78], [-12.43, 62.85], [-11.43, 62.92], [-10.51, 62.99], [-9.65, 63.03], [-8.78, 63.04], [-7.91, 63.03], [-7.03, 63.00], [-6.15, 62.94], [-5.26, 62.86], [-4.37, 62.77], [-3.48, 62.65], [-2.58, 62.52], [-1.68, 62.36], [-0.78, 62.20], [0.12, 62.01], [1.02, 61.81], [1.92, 61.59], [2.83, 61.36], [3.73, 61.12], [4.63, 60.86], [5.53, 60.59], [6.43, 60.32], [7.32, 60.02], [8.22, 59.72], [9.12, 59.41], [10.02, 59.08], [10.91, 58.75], [11.80, 58.41], [12.69, 58.06], [13.58, 57.70], [14.47, 57.33], [15.35, 56.96], [16.24, 56.58], [17.12, 56.19], [18.00, 55.79], [18.88, 55.39], [19.75, 54.98], [20.63, 54.56], [21.55, 54.12], [22.50, 53.68], [23.44, 53.25], [24.40, 52.82], [25.37, 52.40], [26.34, 51.99], [27.32, 51.59], [28.31, 51.20], [29.31, 50.83], [30.33, 50.46], [31.37, 50.11], [32.41, 49.78], [33.47, 49.47], [34.55, 49.18], [35.65, 48.92], [36.77, 48.68], [37.93, 48.48], [39.12, 48.32], [40.34, 48.21], [41.60, 48.15], [42.93, 48.18], [44.29, 48.31], [45.71, 48.56], [47.19, 48.99], [48.67, 49.61], [50.10, 50.46], [51.43, 51.53], [52.54, 52.72], [53.26, 53.69], [53.79, 54.38], [54.33, 55.03], [54.87, 55.65], [55.40, 56.21], [55.93, 56.71], [56.44, 57.13], [56.89, 57.45], [57.25, 57.66], [57.47, 57.75], [57.50, 57.77], [57.52, 57.76], [57.89, 57.66], [58.51, 57.48], [59.17, 57.23], [59.84, 56.93], [60.52, 56.59], [61.21, 56.19], [61.90, 55.76], [62.59, 55.30], [63.29, 54.80], [63.88, 54.35], [64.26, 54.02], [64.55, 53.68], [64.86, 53.23], [65.17, 52.68], [65.47, 52.06], [65.76, 51.37], [66.03, 50.63], [66.28, 49.85], [66.51, 49.03], [66.72, 48.19], [66.90, 47.34], [67.08, 46.45], [67.23, 45.56], [67.37, 44.66], [67.50, 43.74], [67.61, 42.82], [67.71, 41.89], [67.80, 40.96], [67.88, 40.01], [67.95, 39.06], [68.01, 38.09], [68.07, 37.12], [68.13, 36.15], [68.17, 35.18], [68.21, 34.22], [68.24, 33.26], [68.27, 32.30], [68.28, 31.36], [68.28, 30.42], [68.27, 29.49], [68.25, 28.58], [68.21, 27.69], [68.14, 26.83], [68.06, 26.03], [67.95, 25.33], [67.85, 24.84], [67.85, 24.77], [67.52, 24.38], [66.81, 23.24], [66.20, 22.07], [65.71, 20.99], [65.27, 19.95], [64.87, 18.94], [64.49, 17.93], [64.13, 16.94], [63.78, 15.94], [63.45, 14.96], [63.13, 13.98], [62.81, 12.99], [62.50, 12.01], [62.20, 11.04], [61.90, 10.06], [61.61, 9.08], [61.33, 8.14], [61.06, 7.25], [60.77, 6.38], [60.48, 5.51], [60.16, 4.66], [59.84, 3.83], [59.49, 3.00], [59.14, 2.18], [58.76, 1.39], [58.37, 0.61], [57.96, -0.15], [57.53, -0.89], [57.09, -1.61], [56.63, -2.30], [56.15, -2.98], [55.65, -3.62], [55.14, -4.22], [54.60, -4.81], [54.05, -5.36], [53.48, -5.87], [52.90, -6.34], [52.24, -6.82], [51.46, -7.36], [50.62, -7.95], [49.78, -8.54], [48.95, -9.14], [48.12, -9.74], [47.30, -10.34], [46.47, -10.95], [45.65, -11.56], [44.84, -12.17], [44.02, -12.79], [43.21, -13.41], [42.40, -14.04], [41.59, -14.67], [40.79, -15.30], [39.99, -15.93], [39.20, -16.57], [38.40, -17.22], [37.72, -17.78], [37.23, -18.15], [36.89, -18.35], [36.75, -18.42], [36.81, -18.42], [37.03, -18.44], [37.21, -18.49], [37.21, -18.47], [37.04, -18.30], [36.75, -17.95], [36.42, -17.47], [36.09, -16.89], [35.76, -16.22], [35.43, -15.49], [35.13, -14.72], [34.84, -13.92], [34.56, -13.08], [34.30, -12.21], [34.04, -11.30], [33.78, -10.39], [33.54, -9.47], [33.31, -8.55], [33.08, -7.64], [32.87, -6.72], [32.67, -5.81], [32.49, -4.89], [32.32, -3.97], [32.16, -3.06], [32.02, -2.15], [31.89, -1.24], [31.78, -0.33], [31.69, 0.57], [31.61, 1.47], [31.56, 2.37], [31.52, 3.26], [31.50, 4.15], [31.51, 5.03], [31.54, 5.89], [31.59, 6.76], [31.67, 7.61], [31.78, 8.55], [31.91, 9.69], [31.98, 10.93], [31.99, 12.22], [31.91, 13.55], [31.73, 14.93], [31.41, 16.35], [30.92, 17.80], [30.23, 19.25], [29.34, 20.63], [28.25, 21.89], [27.01, 22.98], [25.67, 23.87], [24.30, 24.56], [23.09, 25.03], [22.17, 25.35], [21.40, 25.66], [20.63, 25.99], [19.88, 26.35], [19.13, 26.74], [18.40, 27.15], [17.68, 27.58], [16.97, 28.05], [16.28, 28.53], [15.59, 29.04], [14.92, 29.57], [14.27, 30.13], [13.62, 30.71], [12.98, 31.31], [12.29, 32.00], [11.51, 32.75], [10.69, 33.50], [9.84, 34.25], [8.96, 34.97], [8.04, 35.69], [7.07, 36.38], [6.06, 37.05], [4.97, 37.69], [3.81, 38.28], [2.55, 38.82], [1.23, 39.26], [0.05, 39.55], [-0.94, 39.79], [-1.92, 40.01], [-2.89, 40.24], [-3.65, 40.42], [-4.28, 42.11], [-5.25, 42.34], [-6.23, 42.57], [-7.20, 42.80], [-8.17, 43.03], [-9.15, 43.26], [-10.12, 43.49] ],
++    roadLeft: [ [-32.09, 71.02], [-31.09, 71.09], [-30.09, 71.17], [-29.09, 71.24], [-28.10, 71.32], [-27.10, 71.39], [-26.10, 71.46], [-25.10, 71.54], [-24.11, 71.61], [-23.13, 71.90], [-22.14, 72.19], [-21.16, 72.47], [-20.18, 72.76], [-19.20, 73.05], [-18.22, 73.34], [-17.24, 73.62], [-16.24, 73.70], [-15.24, 73.77], [-14.25, 73.85], [-13.25, 73.92], [-12.25, 73.99], [-11.15, 74.07], [-9.97, 74.12], [-8.80, 74.14], [-7.63, 74.13], [-6.47, 74.08], [-5.34, 73.80], [-4.23, 73.49], [-3.13, 73.15], [-2.06, 72.80], [-1.00, 72.42], [0.05, 72.03], [1.08, 71.61], [2.13, 71.40], [3.18, 71.16], [4.23, 70.91], [5.26, 70.65], [6.29, 70.37], [7.31, 70.08], [8.33, 69.78], [9.34, 69.46], [10.35, 69.14], [11.34, 68.80], [12.33, 68.45], [13.32, 68.10], [14.30, 67.74], [15.36, 67.56], [16.41, 67.38], [17.45, 67.18], [18.50, 66.98], [19.55, 66.77], [20.60, 66.55], [21.64, 66.33], [22.59, 65.90], [23.55, 65.46], [24.49, 65.02], [25.42, 64.58], [26.31, 64.15], [27.16, 63.75], [28.02, 63.36], [28.88, 62.97], [29.72, 62.61], [30.57, 62.25], [31.43, 61.90], [32.29, 61.57], [33.14, 61.25], [33.98, 60.95], [34.81, 60.67], [35.65, 60.40], [36.47, 60.16], [37.29, 59.94], [38.10, 59.74], [38.88, 59.58], [39.64, 59.44], [40.37, 59.35], [41.07, 59.28], [41.73, 59.25], [42.30, 59.26], [42.81, 59.31], [43.22, 59.38], [43.50, 59.46], [43.69, 59.53], [43.80, 59.59], [43.85, 59.64], [43.97, 59.77], [44.39, 60.36], [45.10, 61.29], [45.87, 62.22], [46.68, 63.15], [47.58, 64.08], [48.57, 65.01], [49.68, 65.94], [50.98, 66.85], [52.52, 67.70], [54.39, 68.42], [56.61, 68.83], [58.88, 68.78], [60.67, 68.41], [62.06, 67.99], [63.37, 67.51], [64.60, 66.96], [65.77, 66.37], [66.87, 65.74], [67.93, 65.08], [68.94, 64.41], [69.90, 63.71], [70.96, 62.90], [72.18, 61.79], [73.32, 60.48], [74.23, 59.17], [74.97, 57.89], [75.59, 56.63], [76.10, 55.41], [76.54, 54.21], [76.92, 53.02], [77.24, 51.87], [77.52, 50.72], [77.77, 49.59], [77.99, 48.48], [78.18, 47.37], [78.35, 46.27], [78.50, 45.18], [78.64, 44.10], [78.76, 43.02], [78.86, 41.95], [78.95, 40.88], [79.03, 39.82], [79.09, 38.78], [79.15, 37.75], [79.21, 36.72], [79.26, 35.68], [79.30, 34.63], [79.34, 33.58], [79.36, 32.52], [79.38, 31.45], [79.38, 30.37], [79.37, 29.28], [79.13, 28.17], [78.86, 27.05], [78.56, 25.90], [78.22, 24.70], [77.80, 23.43], [77.24, 21.99], [76.32, 20.25], [75.50, 19.03], [75.14, 18.47], [74.83, 17.86], [74.49, 17.13], [74.16, 16.32], [73.82, 15.48], [73.50, 14.61], [73.18, 13.73], [72.86, 12.83], [72.56, 11.92], [72.25, 11.00], [71.96, 10.08], [71.67, 9.15], [71.58, 8.16], [71.50, 7.16], [71.43, 6.16], [71.35, 5.12], [71.23, 4.03], [71.09, 2.91], [70.93, 1.79], [70.55, 0.74], [70.13, -0.32], [69.70, -1.37], [69.24, -2.42], [68.74, -3.47], [68.22, -4.51], [67.66, -5.55], [67.07, -6.58], [66.43, -7.60], [65.76, -8.62], [65.04, -9.61], [64.28, -10.60], [63.46, -11.57], [62.60, -12.50], [61.68, -13.42], [60.71, -14.30], [59.68, -15.13], [58.68, -15.86], [57.80, -16.47], [57.01, -17.03], [56.22, -17.59], [55.43, -18.15], [54.52, -18.55], [53.61, -18.95], [52.70, -19.35], [51.79, -19.76], [50.88, -20.17], [49.97, -20.59], [49.07, -21.02], [48.29, -21.62], [47.52, -22.22], [46.75, -22.82], [45.99, -23.43], [45.23, -24.04], [44.47, -24.66], [43.60, -25.37], [42.48, -26.18], [41.09, -26.98], [39.38, -27.65], [37.35, -28.00], [35.14, -27.85], [33.07, -27.15], [31.39, -26.11], [30.09, -24.93], [29.09, -23.74], [28.29, -22.57], [27.63, -21.42], [27.07, -20.31], [26.58, -19.21], [26.15, -18.12], [25.56, -17.11], [25.00, -16.11], [24.48, -15.12], [23.98, -14.16], [23.49, -13.19], [23.00, -12.21], [22.53, -11.23], [22.28, -10.19], [22.04, -9.14], [21.81, -8.08], [21.59, -7.01], [21.39, -5.94], [21.21, -4.86], [21.04, -3.77], [20.88, -2.68], [20.75, -1.57], [20.64, -0.46], [20.54, 0.66], [20.47, 1.79], [20.42, 2.93], [20.62, 4.09], [20.84, 5.24], [21.09, 6.39], [21.38, 7.52], [21.69, 8.67], [22.03, 9.68], [22.34, 10.51], [22.39, 11.26], [22.39, 11.98], [22.36, 12.64], [22.28, 13.24], [22.16, 13.77], [22.01, 14.21], [21.84, 14.58], [21.65, 14.88], [21.44, 15.12], [21.17, 15.35], [20.85, 15.57], [20.44, 15.77], [19.78, 16.02], [18.81, 16.36], [17.72, 16.79], [16.65, 17.26], [15.60, 17.76], [14.57, 18.29], [13.56, 18.86], [12.57, 19.46], [11.60, 20.09], [10.66, 20.75], [9.74, 21.43], [8.84, 22.15], [7.97, 22.88], [7.13, 23.64], [6.31, 24.41], [5.58, 25.13], [4.92, 25.76], [4.27, 26.36], [3.62, 26.94], [2.96, 27.48], [2.30, 28.00], [1.64, 28.47], [0.98, 28.90], [0.35, 29.28], [-0.27, 29.59], [-0.85, 29.84], [-1.43, 30.03], [-2.19, 30.22], [-3.14, 30.44], [-4.12, 30.67], [-5.09, 30.90], [-5.85, 31.08], [-6.82, 31.31], [-7.80, 31.54], [-8.77, 31.76], [-9.74, 31.99], [-10.72, 32.22], [-11.69, 32.45], [-12.66, 32.68] ],
++    roadRight: [ [-31.38, 61.45], [-30.38, 61.52], [-29.38, 61.59], [-28.38, 61.67], [-27.39, 61.74], [-26.39, 61.82], [-25.39, 61.89], [-24.40, 61.96], [-23.40, 62.04], [-22.39, 61.90], [-21.37, 61.76], [-20.36, 61.62], [-19.35, 61.48], [-18.33, 61.34], [-17.32, 61.20], [-16.31, 61.06], [-15.31, 61.13], [-14.31, 61.21], [-13.31, 61.28], [-12.32, 61.35], [-11.32, 61.43], [-10.42, 61.49], [-9.61, 61.53], [-8.78, 61.54], [-7.95, 61.53], [-7.11, 61.50], [-6.24, 61.66], [-5.36, 61.80], [-4.47, 61.92], [-3.57, 62.02], [-2.65, 62.09], [-1.72, 62.15], [-0.78, 62.20], [0.12, 62.01], [1.02, 61.81], [1.92, 61.59], [2.83, 61.36], [3.73, 61.12], [4.63, 60.86], [5.53, 60.59], [6.43, 60.32], [7.32, 60.02], [8.22, 59.72], [9.12, 59.41], [10.02, 59.08], [10.91, 58.75], [11.72, 58.21], [12.53, 57.66], [13.34, 57.11], [14.14, 56.54], [14.93, 55.98], [15.72, 55.40], [16.51, 54.82], [17.38, 54.43], [18.25, 54.03], [19.11, 53.62], [19.99, 53.21], [20.90, 52.77], [21.87, 52.32], [22.82, 51.88], [23.79, 51.45], [24.78, 51.02], [25.77, 50.60], [26.77, 50.20], [27.78, 49.80], [28.80, 49.42], [29.84, 49.05], [30.90, 48.69], [31.97, 48.35], [33.06, 48.03], [34.18, 47.73], [35.32, 47.45], [36.49, 47.21], [37.70, 46.99], [38.95, 46.83], [40.24, 46.71], [41.58, 46.65], [43.01, 46.68], [44.49, 46.82], [46.05, 47.10], [47.69, 47.57], [49.34, 48.27], [50.96, 49.22], [52.46, 50.43], [53.70, 51.76], [54.46, 52.79], [54.96, 53.44], [55.47, 54.06], [55.97, 54.63], [56.46, 55.14], [56.93, 55.59], [57.35, 55.94], [57.69, 56.18], [57.89, 56.30], [57.89, 56.31], [57.63, 56.28], [57.34, 56.27], [57.51, 56.21], [58.04, 56.05], [58.60, 55.84], [59.19, 55.58], [59.81, 55.26], [60.44, 54.91], [61.09, 54.50], [61.74, 54.07], [62.39, 53.59], [62.93, 53.19], [63.19, 52.96], [63.36, 52.76], [63.59, 52.43], [63.85, 51.98], [64.11, 51.44], [64.37, 50.82], [64.61, 50.14], [64.84, 49.42], [65.06, 48.65], [65.26, 47.85], [65.43, 47.03], [65.60, 46.18], [65.75, 45.32], [65.89, 44.44], [66.01, 43.55], [66.12, 42.65], [66.22, 41.74], [66.31, 40.82], [66.39, 39.89], [66.46, 38.96], [66.52, 38.00], [66.58, 37.04], [66.63, 36.07], [66.67, 35.12], [66.71, 34.16], [66.74, 33.22], [66.77, 32.27], [66.78, 31.34], [66.78, 30.42], [66.77, 29.52], [66.96, 28.63], [67.14, 27.75], [67.29, 26.91], [67.42, 26.11], [67.53, 25.41], [67.64, 24.90], [67.85, 24.77], [67.52, 24.38], [66.81, 23.24], [66.20, 22.07], [65.71, 20.99], [65.27, 19.95], [64.87, 18.94], [64.49, 17.93], [64.13, 16.94], [63.78, 15.94], [63.45, 14.96], [63.13, 13.98], [62.81, 12.99], [62.50, 12.01], [61.99, 11.10], [61.49, 10.18], [60.99, 9.26], [60.51, 8.38], [60.04, 7.57], [59.56, 6.79], [59.06, 6.02], [58.76, 5.19], [58.45, 4.39], [58.11, 3.59], [57.77, 2.81], [57.41, 2.05], [57.04, 1.30], [56.65, 0.58], [56.25, -0.12], [55.83, -0.80], [55.39, -1.45], [54.94, -2.08], [54.48, -2.67], [54.01, -3.23], [53.52, -3.77], [53.02, -4.27], [52.51, -4.73], [51.98, -5.16], [51.37, -5.60], [50.60, -6.13], [49.76, -6.72], [48.92, -7.32], [48.08, -7.92], [47.37, -8.70], [46.66, -9.47], [45.96, -10.26], [45.27, -11.04], [44.58, -11.83], [43.89, -12.62], [43.21, -13.41], [42.40, -14.04], [41.59, -14.67], [40.79, -15.30], [39.99, -15.93], [39.20, -16.57], [38.40, -17.22], [37.72, -17.78], [37.23, -18.15], [36.89, -18.35], [36.75, -18.42], [36.81, -18.42], [37.03, -18.44], [37.21, -18.49], [37.21, -18.47], [37.04, -18.30], [36.75, -17.95], [36.42, -17.47], [36.09, -16.89], [35.76, -16.22], [35.43, -15.49], [35.13, -14.72], [35.04, -13.85], [34.97, -12.95], [34.91, -12.02], [34.86, -11.07], [34.82, -10.10], [34.78, -9.15], [34.76, -8.19], [34.54, -7.29], [34.34, -6.39], [34.14, -5.50], [33.96, -4.60], [33.79, -3.71], [33.64, -2.82], [33.50, -1.93], [33.38, -1.04], [33.27, -0.16], [33.18, 0.71], [33.11, 1.58], [33.05, 2.45], [33.02, 3.31], [32.79, 4.15], [32.58, 5.00], [32.39, 5.85], [32.23, 6.71], [32.09, 7.56], [32.00, 8.53], [31.91, 9.69], [31.98, 10.93], [31.99, 12.22], [31.91, 13.55], [31.73, 14.93], [31.41, 16.35], [30.92, 17.80], [30.23, 19.25], [29.34, 20.63], [28.25, 21.89], [27.01, 22.98], [25.67, 23.87], [24.30, 24.56], [23.09, 25.03], [22.17, 25.35], [21.40, 25.66], [20.63, 25.99], [19.88, 26.35], [19.13, 26.74], [18.40, 27.15], [17.68, 27.58], [16.97, 28.05], [16.28, 28.53], [15.59, 29.04], [14.92, 29.57], [14.27, 30.13], [13.62, 30.71], [12.98, 31.31], [12.29, 32.00], [11.51, 32.75], [10.69, 33.50], [9.84, 34.25], [8.96, 34.97], [8.04, 35.69], [7.07, 36.38], [6.06, 37.05], [4.97, 37.69], [3.81, 38.28], [2.55, 38.82], [1.23, 39.26], [0.05, 39.55], [-0.94, 39.79], [-1.92, 40.01], [-2.89, 40.24], [-3.65, 40.42], [-4.62, 40.65], [-5.60, 40.88], [-6.57, 41.11], [-7.54, 41.34], [-8.52, 41.57], [-9.49, 41.80], [-10.46, 42.03] ],
++    physLeft: [ [-32.20, 72.52], [-31.20, 72.59], [-30.20, 72.66], [-29.20, 72.74], [-28.21, 72.81], [-27.21, 72.89], [-26.21, 72.96], [-25.22, 73.03], [-24.22, 73.11], [-23.22, 73.18], [-22.22, 73.25], [-21.23, 73.33], [-20.23, 73.40], [-19.23, 73.48], [-18.23, 73.55], [-17.24, 73.62], [-16.24, 73.70], [-15.24, 73.77], [-14.25, 73.85], [-13.25, 73.92], [-12.25, 73.99], [-11.15, 74.07], [-9.97, 74.12], [-8.80, 74.14], [-7.63, 74.13], [-6.47, 74.08], [-5.32, 74.01], [-4.19, 73.91], [-3.06, 73.79], [-1.94, 73.64], [-0.83, 73.48], [0.28, 73.29], [1.37, 73.09], [2.45, 72.86], [3.52, 72.62], [4.59, 72.37], [5.64, 72.10], [6.69, 71.82], [7.73, 71.52], [8.76, 71.21], [9.79, 70.89], [10.82, 70.56], [11.83, 70.22], [12.83, 69.87], [13.83, 69.51], [14.83, 69.14], [15.82, 68.76], [16.80, 68.37], [17.78, 67.98], [18.75, 67.58], [19.72, 67.17], [20.69, 66.75], [21.64, 66.33], [22.59, 65.90], [23.55, 65.46], [24.49, 65.02], [25.42, 64.58], [26.31, 64.15], [27.16, 63.75], [28.02, 63.36], [28.88, 62.97], [29.72, 62.61], [30.57, 62.25], [31.43, 61.90], [32.29, 61.57], [33.14, 61.25], [33.98, 60.95], [34.81, 60.67], [35.65, 60.40], [36.47, 60.16], [37.29, 59.94], [38.10, 59.74], [38.88, 59.58], [39.64, 59.44], [40.37, 59.35], [41.07, 59.28], [41.73, 59.25], [42.30, 59.26], [42.81, 59.31], [43.22, 59.38], [43.50, 59.46], [43.69, 59.53], [43.80, 59.59], [43.85, 59.64], [43.97, 59.77], [44.39, 60.36], [45.10, 61.29], [45.87, 62.22], [46.68, 63.15], [47.58, 64.08], [48.57, 65.01], [49.68, 65.94], [50.98, 66.85], [52.52, 67.70], [54.39, 68.42], [56.61, 68.83], [58.88, 68.78], [60.67, 68.41], [62.06, 67.99], [63.37, 67.51], [64.60, 66.96], [65.77, 66.37], [66.87, 65.74], [67.93, 65.08], [68.94, 64.41], [69.90, 63.71], [70.96, 62.90], [72.18, 61.79], [73.32, 60.48], [74.23, 59.17], [74.97, 57.89], [75.59, 56.63], [76.10, 55.41], [76.54, 54.21], [76.92, 53.02], [77.24, 51.87], [77.52, 50.72], [77.77, 49.59], [77.99, 48.48], [78.18, 47.37], [78.35, 46.27], [78.50, 45.18], [78.64, 44.10], [78.76, 43.02], [78.86, 41.95], [78.95, 40.88], [79.03, 39.82], [79.09, 38.78], [79.15, 37.75], [79.21, 36.72], [79.26, 35.68], [79.30, 34.63], [79.34, 33.58], [79.36, 32.52], [79.38, 31.45], [79.38, 30.37], [79.37, 29.28], [79.34, 28.16], [79.29, 27.02], [79.20, 25.84], [79.07, 24.59], [78.85, 23.23], [78.47, 21.62], [77.65, 19.55], [76.74, 18.19], [76.44, 17.72], [76.18, 17.21], [75.87, 16.52], [75.54, 15.76], [75.22, 14.94], [74.90, 14.09], [74.59, 13.23], [74.28, 12.34], [73.98, 11.45], [73.68, 10.54], [73.39, 9.63], [73.10, 8.71], [72.81, 7.78], [72.53, 6.85], [72.25, 5.92], [71.96, 4.94], [71.64, 3.90], [71.30, 2.84], [70.93, 1.79], [70.55, 0.74], [70.13, -0.32], [69.70, -1.37], [69.24, -2.42], [68.74, -3.47], [68.22, -4.51], [67.66, -5.55], [67.07, -6.58], [66.43, -7.60], [65.76, -8.62], [65.04, -9.61], [64.28, -10.60], [63.46, -11.57], [62.60, -12.50], [61.68, -13.42], [60.71, -14.30], [59.68, -15.13], [58.68, -15.86], [57.80, -16.47], [57.01, -17.03], [56.22, -17.59], [55.43, -18.15], [54.64, -18.72], [53.86, -19.29], [53.08, -19.87], [52.30, -20.45], [51.52, -21.03], [50.75, -21.62], [49.98, -22.21], [49.21, -22.80], [48.45, -23.40], [47.69, -24.00], [46.93, -24.60], [46.17, -25.21], [45.41, -25.82], [44.52, -26.55], [43.30, -27.44], [41.74, -28.33], [39.79, -29.09], [37.44, -29.50], [34.85, -29.32], [32.43, -28.50], [30.48, -27.30], [29.00, -25.96], [27.90, -24.65], [27.02, -23.37], [26.31, -22.13], [25.71, -20.95], [25.20, -19.79], [24.75, -18.65], [24.34, -17.53], [23.98, -16.43], [23.66, -15.36], [23.36, -14.33], [23.07, -13.30], [22.80, -12.27], [22.53, -11.23], [22.28, -10.19], [22.04, -9.14], [21.81, -8.08], [21.59, -7.01], [21.39, -5.94], [21.21, -4.86], [21.04, -3.77], [20.88, -2.68], [20.75, -1.57], [20.64, -0.46], [20.54, 0.66], [20.47, 1.79], [20.42, 2.93], [20.40, 4.09], [20.41, 5.24], [20.45, 6.42], [20.52, 7.59], [20.63, 8.78], [20.76, 9.83], [20.85, 10.64], [20.89, 11.31], [20.89, 11.94], [20.86, 12.50], [20.80, 12.98], [20.71, 13.37], [20.62, 13.65], [20.53, 13.85], [20.45, 13.98], [20.38, 14.07], [20.26, 14.16], [20.09, 14.27], [19.83, 14.40], [19.26, 14.61], [18.28, 14.96], [17.14, 15.41], [16.03, 15.89], [14.94, 16.41], [13.86, 16.97], [12.80, 17.56], [11.77, 18.19], [10.76, 18.85], [9.78, 19.53], [8.83, 20.25], [7.89, 20.99], [6.99, 21.75], [6.11, 22.53], [5.27, 23.33], [4.54, 24.05], [3.90, 24.67], [3.27, 25.25], [2.64, 25.80], [2.02, 26.31], [1.40, 26.80], [0.79, 27.23], [0.19, 27.63], [-0.38, 27.96], [-0.91, 28.23], [-1.39, 28.44], [-1.84, 28.59], [-2.54, 28.76], [-3.49, 28.98], [-4.46, 29.21], [-5.43, 29.44], [-6.19, 29.62], [-7.17, 29.85], [-8.14, 30.08], [-9.11, 30.30], [-10.09, 30.53], [-11.06, 30.76], [-12.03, 30.99], [-13.01, 31.22] ],
++    physRight: [ [-31.27, 59.95], [-30.27, 60.02], [-29.27, 60.10], [-28.27, 60.17], [-27.28, 60.25], [-26.28, 60.32], [-25.28, 60.39], [-24.28, 60.47], [-23.29, 60.54], [-22.29, 60.61], [-21.29, 60.69], [-20.30, 60.76], [-19.30, 60.84], [-18.30, 60.91], [-17.30, 60.98], [-16.31, 61.06], [-15.31, 61.13], [-14.31, 61.21], [-13.31, 61.28], [-12.32, 61.35], [-11.32, 61.43], [-10.42, 61.49], [-9.61, 61.53], [-8.78, 61.54], [-7.95, 61.53], [-7.11, 61.50], [-6.26, 61.45], [-5.41, 61.37], [-4.55, 61.28], [-3.68, 61.17], [-2.82, 61.04], [-1.95, 60.89], [-1.07, 60.72], [-0.20, 60.54], [0.68, 60.35], [1.56, 60.14], [2.45, 59.91], [3.33, 59.67], [4.21, 59.42], [5.10, 59.16], [5.97, 58.89], [6.85, 58.60], [7.74, 58.30], [8.62, 57.99], [9.50, 57.67], [10.38, 57.35], [11.26, 57.01], [12.13, 56.67], [13.02, 56.31], [13.89, 55.95], [14.76, 55.58], [15.63, 55.21], [16.51, 54.82], [17.38, 54.43], [18.25, 54.03], [19.11, 53.62], [19.99, 53.21], [20.90, 52.77], [21.87, 52.32], [22.82, 51.88], [23.79, 51.45], [24.78, 51.02], [25.77, 50.60], [26.77, 50.20], [27.78, 49.80], [28.80, 49.42], [29.84, 49.05], [30.90, 48.69], [31.97, 48.35], [33.06, 48.03], [34.18, 47.73], [35.32, 47.45], [36.49, 47.21], [37.70, 46.99], [38.95, 46.83], [40.24, 46.71], [41.58, 46.65], [43.01, 46.68], [44.49, 46.82], [46.05, 47.10], [47.69, 47.57], [49.34, 48.27], [50.96, 49.22], [52.46, 50.43], [53.70, 51.76], [54.46, 52.79], [54.96, 53.44], [55.47, 54.06], [55.97, 54.63], [56.46, 55.14], [56.93, 55.59], [57.35, 55.94], [57.69, 56.18], [57.89, 56.30], [57.89, 56.31], [57.63, 56.28], [57.34, 56.27], [57.51, 56.21], [58.04, 56.05], [58.60, 55.84], [59.19, 55.58], [59.81, 55.26], [60.44, 54.91], [61.09, 54.50], [61.74, 54.07], [62.39, 53.59], [62.93, 53.19], [63.19, 52.96], [63.36, 52.76], [63.59, 52.43], [63.85, 51.98], [64.11, 51.44], [64.37, 50.82], [64.61, 50.14], [64.84, 49.42], [65.06, 48.65], [65.26, 47.85], [65.43, 47.03], [65.60, 46.18], [65.75, 45.32], [65.89, 44.44], [66.01, 43.55], [66.12, 42.65], [66.22, 41.74], [66.31, 40.82], [66.39, 39.89], [66.46, 38.96], [66.52, 38.00], [66.58, 37.04], [66.63, 36.07], [66.67, 35.12], [66.71, 34.16], [66.74, 33.22], [66.77, 32.27], [66.78, 31.34], [66.78, 30.42], [66.77, 29.52], [66.75, 28.63], [66.71, 27.78], [66.65, 26.97], [66.57, 26.22], [66.48, 25.61], [66.41, 25.27], [66.53, 25.48], [66.28, 25.21], [65.51, 23.99], [64.85, 22.73], [64.33, 21.60], [63.88, 20.52], [63.47, 19.48], [63.08, 18.45], [62.71, 17.44], [62.36, 16.43], [62.03, 15.43], [61.70, 14.44], [61.38, 13.45], [61.07, 12.46], [60.77, 11.48], [60.47, 10.49], [60.17, 9.51], [59.90, 8.57], [59.63, 7.70], [59.35, 6.86], [59.06, 6.02], [58.76, 5.19], [58.45, 4.39], [58.11, 3.59], [57.77, 2.81], [57.41, 2.05], [57.04, 1.30], [56.65, 0.58], [56.25, -0.12], [55.83, -0.80], [55.39, -1.45], [54.94, -2.08], [54.48, -2.67], [54.01, -3.23], [53.52, -3.77], [53.02, -4.27], [52.51, -4.73], [51.98, -5.16], [51.37, -5.60], [50.60, -6.13], [49.76, -6.72], [48.92, -7.32], [48.08, -7.92], [47.24, -8.52], [46.41, -9.13], [45.58, -9.74], [44.75, -10.36], [43.93, -10.97], [43.11, -11.60], [42.29, -12.22], [41.48, -12.85], [40.67, -13.49], [39.86, -14.12], [39.06, -14.76], [38.25, -15.41], [37.46, -16.06], [36.80, -16.59], [36.41, -16.89], [36.24, -17.00], [36.33, -16.98], [36.73, -16.92], [37.33, -16.97], [37.86, -17.14], [38.12, -17.28], [38.12, -17.27], [37.95, -17.05], [37.70, -16.68], [37.41, -16.18], [37.11, -15.58], [36.82, -14.91], [36.53, -14.19], [36.26, -13.43], [35.99, -12.62], [35.74, -11.78], [35.48, -10.89], [35.23, -9.99], [34.99, -9.09], [34.76, -8.19], [34.54, -7.29], [34.34, -6.39], [34.14, -5.50], [33.96, -4.60], [33.79, -3.71], [33.64, -2.82], [33.50, -1.93], [33.38, -1.04], [33.27, -0.16], [33.18, 0.71], [33.11, 1.58], [33.05, 2.45], [33.02, 3.31], [33.00, 4.15], [33.01, 5.00], [33.04, 5.82], [33.09, 6.65], [33.16, 7.45], [33.27, 8.38], [33.40, 9.56], [33.48, 10.88], [33.49, 12.26], [33.41, 13.69], [33.20, 15.19], [32.85, 16.75], [32.31, 18.36], [31.54, 19.98], [30.54, 21.53], [29.31, 22.95], [27.92, 24.17], [26.43, 25.17], [24.90, 25.94], [23.60, 26.44], [22.70, 26.76], [21.97, 27.04], [21.26, 27.36], [20.54, 27.69], [19.85, 28.06], [19.16, 28.44], [18.48, 28.85], [17.81, 29.29], [17.15, 29.75], [16.51, 30.23], [15.87, 30.74], [15.25, 31.26], [14.64, 31.81], [14.02, 32.39], [13.33, 33.07], [12.54, 33.84], [11.69, 34.62], [10.81, 35.39], [9.90, 36.15], [8.94, 36.89], [7.92, 37.62], [6.85, 38.32], [5.69, 39.00], [4.44, 39.64], [3.09, 40.22], [1.64, 40.70], [0.40, 41.01], [-0.60, 41.25], [-1.57, 41.47], [-2.55, 41.70], [-3.31, 41.88], [-4.28, 42.11], [-5.25, 42.34], [-6.23, 42.57], [-7.20, 42.80], [-8.17, 43.03], [-9.15, 43.26], [-10.12, 43.49] ],
++    sideLeft: [ [-32.23, 73.01], [-31.24, 73.09], [-30.24, 73.16], [-29.24, 73.24], [-28.24, 73.31], [-27.25, 73.38], [-26.25, 73.46], [-25.25, 73.53], [-24.26, 73.61], [-23.26, 73.68], [-22.26, 73.75], [-21.26, 73.83], [-20.27, 73.90], [-19.27, 73.97], [-18.27, 74.05], [-17.27, 74.12], [-16.28, 74.20], [-15.28, 74.27], [-14.28, 74.34], [-13.29, 74.42], [-12.28, 74.49], [-11.18, 74.57], [-9.99, 74.62], [-8.80, 74.64], [-7.62, 74.63], [-6.45, 74.58], [-5.29, 74.51], [-4.14, 74.41], [-3.00, 74.29], [-1.87, 74.14], [-0.75, 73.97], [0.36, 73.78], [1.46, 73.58], [2.55, 73.35], [3.63, 73.11], [4.71, 72.85], [5.77, 72.58], [6.82, 72.30], [7.87, 72.00], [8.91, 71.69], [9.95, 71.37], [10.98, 71.03], [11.99, 70.69], [13.00, 70.34], [14.00, 69.98], [15.00, 69.61], [16.00, 69.22], [16.99, 68.83], [17.97, 68.44], [18.94, 68.04], [19.92, 67.63], [20.89, 67.21], [21.84, 66.78], [22.80, 66.35], [23.76, 65.91], [24.70, 65.47], [25.64, 65.03], [26.52, 64.60], [27.37, 64.21], [28.23, 63.81], [29.08, 63.43], [29.92, 63.07], [30.76, 62.71], [31.62, 62.37], [32.46, 62.03], [33.31, 61.72], [34.14, 61.42], [34.97, 61.14], [35.79, 60.88], [36.61, 60.64], [37.42, 60.42], [38.21, 60.23], [38.98, 60.07], [39.71, 59.94], [40.42, 59.84], [41.11, 59.78], [41.73, 59.75], [42.27, 59.76], [42.74, 59.80], [43.11, 59.87], [43.34, 59.93], [43.46, 59.98], [43.51, 60.00], [43.51, 60.00], [43.58, 60.09], [43.99, 60.66], [44.71, 61.60], [45.49, 62.54], [46.32, 63.49], [47.23, 64.44], [48.23, 65.39], [49.38, 66.34], [50.71, 67.27], [52.31, 68.16], [54.25, 68.90], [56.57, 69.33], [58.95, 69.27], [60.79, 68.90], [62.22, 68.47], [63.56, 67.97], [64.82, 67.41], [66.00, 66.81], [67.13, 66.17], [68.20, 65.50], [69.22, 64.82], [70.20, 64.11], [71.28, 63.29], [72.54, 62.14], [73.72, 60.79], [74.65, 59.44], [75.42, 58.12], [76.04, 56.84], [76.57, 55.59], [77.01, 54.37], [77.39, 53.17], [77.72, 51.99], [78.01, 50.84], [78.26, 49.69], [78.48, 48.57], [78.68, 47.45], [78.85, 46.34], [79.00, 45.25], [79.14, 44.16], [79.25, 43.07], [79.36, 41.99], [79.45, 40.92], [79.52, 39.86], [79.59, 38.82], [79.65, 37.78], [79.71, 36.74], [79.76, 35.70], [79.80, 34.65], [79.84, 33.59], [79.86, 32.53], [79.88, 31.46], [79.88, 30.37], [79.87, 29.27], [79.84, 28.15], [79.79, 26.99], [79.70, 25.80], [79.56, 24.53], [79.34, 23.14], [78.95, 21.47], [78.09, 19.31], [77.16, 17.91], [76.88, 17.48], [76.63, 16.99], [76.32, 16.32], [76.01, 15.57], [75.69, 14.76], [75.37, 13.92], [75.06, 13.06], [74.76, 12.18], [74.45, 11.29], [74.16, 10.39], [73.86, 9.48], [73.57, 8.56], [73.29, 7.64], [73.01, 6.71], [72.73, 5.78], [72.44, 4.80], [72.12, 3.75], [71.77, 2.68], [71.40, 1.62], [71.01, 0.56], [70.60, -0.51], [70.16, -1.57], [69.69, -2.63], [69.19, -3.69], [68.66, -4.74], [68.10, -5.79], [67.49, -6.84], [66.85, -7.87], [66.17, -8.90], [65.44, -9.91], [64.67, -10.92], [63.83, -11.90], [62.96, -12.85], [62.03, -13.78], [61.03, -14.67], [59.99, -15.52], [58.97, -16.27], [58.09, -16.88], [57.30, -17.44], [56.51, -18.00], [55.72, -18.56], [54.94, -19.12], [54.15, -19.69], [53.38, -20.27], [52.60, -20.85], [51.83, -21.43], [51.05, -22.01], [50.29, -22.60], [49.52, -23.19], [48.76, -23.79], [48.00, -24.39], [47.24, -24.99], [46.48, -25.60], [45.73, -26.21], [44.83, -26.95], [43.58, -27.86], [41.96, -28.78], [39.93, -29.57], [37.46, -30.00], [34.75, -29.81], [32.21, -28.96], [30.18, -27.70], [28.64, -26.31], [27.50, -24.95], [26.60, -23.64], [25.87, -22.37], [25.26, -21.16], [24.74, -19.98], [24.28, -18.83], [23.87, -17.69], [23.51, -16.58], [23.18, -15.51], [22.88, -14.47], [22.59, -13.43], [22.31, -12.39], [22.05, -11.35], [21.79, -10.30], [21.55, -9.25], [21.32, -8.18], [21.10, -7.11], [20.90, -6.03], [20.71, -4.94], [20.54, -3.84], [20.39, -2.74], [20.25, -1.63], [20.14, -0.51], [20.04, 0.63], [19.97, 1.77], [19.92, 2.92], [19.90, 4.08], [19.91, 5.25], [19.95, 6.44], [20.02, 7.63], [20.13, 8.83], [20.26, 9.89], [20.35, 10.68], [20.39, 11.33], [20.39, 11.93], [20.36, 12.45], [20.31, 12.89], [20.23, 13.24], [20.16, 13.47], [20.10, 13.60], [20.05, 13.68], [20.02, 13.71], [19.96, 13.76], [19.84, 13.84], [19.63, 13.94], [19.09, 14.14], [18.10, 14.49], [16.95, 14.94], [15.82, 15.44], [14.71, 15.96], [13.62, 16.53], [12.55, 17.13], [11.50, 17.77], [10.48, 18.43], [9.49, 19.13], [8.52, 19.85], [7.58, 20.60], [6.66, 21.37], [5.77, 22.17], [4.92, 22.97], [4.19, 23.69], [3.55, 24.31], [2.93, 24.88], [2.32, 25.42], [1.70, 25.92], [1.10, 26.40], [0.50, 26.82], [-0.07, 27.20], [-0.62, 27.52], [-1.12, 27.78], [-1.56, 27.97], [-1.98, 28.11], [-2.65, 28.27], [-3.60, 28.49], [-4.57, 28.72], [-5.55, 28.95], [-6.31, 29.13], [-7.28, 29.36], [-8.25, 29.59], [-9.23, 29.82], [-10.20, 30.05], [-11.17, 30.28], [-12.15, 30.50], [-13.12, 30.73] ],
++    sideRight: [ [-31.23, 59.45], [-30.23, 59.53], [-29.23, 59.60], [-28.24, 59.67], [-27.24, 59.75], [-26.24, 59.82], [-25.24, 59.89], [-24.25, 59.97], [-23.25, 60.04], [-22.25, 60.12], [-21.26, 60.19], [-20.26, 60.26], [-19.26, 60.34], [-18.26, 60.41], [-17.27, 60.49], [-16.27, 60.56], [-15.27, 60.63], [-14.27, 60.71], [-13.28, 60.78], [-12.28, 60.86], [-11.29, 60.93], [-10.39, 60.99], [-9.59, 61.03], [-8.78, 61.04], [-7.96, 61.03], [-7.13, 61.00], [-6.30, 60.95], [-5.45, 60.87], [-4.61, 60.78], [-3.75, 60.67], [-2.90, 60.54], [-2.03, 60.40], [-1.17, 60.23], [-0.30, 60.05], [0.57, 59.86], [1.44, 59.65], [2.32, 59.43], [3.20, 59.19], [4.07, 58.94], [4.95, 58.68], [5.82, 58.41], [6.69, 58.13], [7.57, 57.83], [8.45, 57.52], [9.33, 57.20], [10.21, 56.88], [11.08, 56.55], [11.95, 56.20], [12.83, 55.85], [13.70, 55.49], [14.57, 55.12], [15.43, 54.75], [16.31, 54.36], [17.18, 53.97], [18.04, 53.58], [18.90, 53.17], [19.77, 52.76], [20.69, 52.32], [21.66, 51.86], [22.62, 51.42], [23.59, 50.99], [24.58, 50.56], [25.58, 50.14], [26.58, 49.73], [27.60, 49.33], [28.63, 48.95], [29.68, 48.57], [30.75, 48.21], [31.83, 47.87], [32.93, 47.55], [34.05, 47.25], [35.21, 46.97], [36.39, 46.72], [37.62, 46.50], [38.90, 46.33], [40.21, 46.21], [41.58, 46.15], [43.04, 46.18], [44.56, 46.33], [46.16, 46.61], [47.85, 47.10], [49.57, 47.82], [51.24, 48.81], [52.80, 50.07], [54.08, 51.45], [54.86, 52.49], [55.36, 53.13], [55.85, 53.74], [56.34, 54.30], [56.81, 54.79], [57.26, 55.21], [57.65, 55.54], [57.95, 55.76], [58.10, 55.85], [58.02, 55.83], [57.67, 55.78], [57.28, 55.78], [57.39, 55.73], [57.88, 55.58], [58.41, 55.38], [58.98, 55.13], [59.57, 54.82], [60.19, 54.48], [60.82, 54.08], [61.45, 53.66], [62.10, 53.19], [62.61, 52.80], [62.84, 52.61], [62.97, 52.46], [63.17, 52.16], [63.40, 51.75], [63.65, 51.24], [63.90, 50.64], [64.14, 49.98], [64.36, 49.28], [64.57, 48.52], [64.77, 47.74], [64.95, 46.93], [65.11, 46.09], [65.26, 45.24], [65.39, 44.37], [65.52, 43.48], [65.63, 42.59], [65.72, 41.69], [65.81, 40.78], [65.89, 39.86], [65.96, 38.92], [66.02, 37.97], [66.08, 37.01], [66.13, 36.05], [66.17, 35.09], [66.21, 34.15], [66.24, 33.20], [66.27, 32.26], [66.28, 31.34], [66.28, 30.43], [66.27, 29.53], [66.25, 28.65], [66.21, 27.81], [66.15, 27.01], [66.08, 26.29], [65.99, 25.70], [65.93, 25.42], [66.09, 25.72], [65.86, 25.49], [65.08, 24.24], [64.41, 22.95], [63.88, 21.80], [63.42, 20.71], [63.00, 19.66], [62.61, 18.62], [62.24, 17.60], [61.89, 16.59], [61.55, 15.59], [61.22, 14.59], [60.90, 13.60], [60.59, 12.61], [60.29, 11.62], [59.99, 10.63], [59.69, 9.65], [59.42, 8.71], [59.15, 7.85], [58.88, 7.02], [58.59, 6.18], [58.29, 5.37], [57.98, 4.57], [57.65, 3.78], [57.32, 3.01], [56.96, 2.27], [56.59, 1.53], [56.21, 0.82], [55.82, 0.13], [55.41, -0.53], [54.98, -1.17], [54.54, -1.78], [54.10, -2.36], [53.64, -2.90], [53.16, -3.42], [52.67, -3.91], [52.18, -4.35], [51.68, -4.76], [51.08, -5.19], [50.32, -5.72], [49.47, -6.32], [48.63, -6.91], [47.79, -7.51], [46.95, -8.12], [46.11, -8.73], [45.28, -9.34], [44.45, -9.95], [43.63, -10.57], [42.81, -11.20], [41.99, -11.83], [41.17, -12.46], [40.36, -13.09], [39.55, -13.73], [38.74, -14.37], [37.94, -15.02], [37.14, -15.67], [36.49, -16.20], [36.13, -16.47], [36.02, -16.55], [36.20, -16.50], [36.70, -16.42], [37.43, -16.48], [38.08, -16.69], [38.42, -16.88], [38.48, -16.92], [38.35, -16.75], [38.12, -16.41], [37.85, -15.94], [37.57, -15.36], [37.28, -14.71], [37.00, -14.01], [36.73, -13.26], [36.47, -12.47], [36.22, -11.64], [35.96, -10.75], [35.71, -9.86], [35.47, -8.97], [35.25, -8.07], [35.03, -7.18], [34.82, -6.28], [34.63, -5.40], [34.45, -4.51], [34.29, -3.62], [34.13, -2.74], [34.00, -1.86], [33.87, -0.98], [33.77, -0.11], [33.68, 0.76], [33.61, 1.62], [33.55, 2.47], [33.52, 3.32], [33.50, 4.16], [33.51, 4.99], [33.53, 5.80], [33.58, 6.61], [33.65, 7.40], [33.77, 8.32], [33.90, 9.52], [33.98, 10.86], [33.99, 12.27], [33.90, 13.74], [33.70, 15.28], [33.33, 16.89], [32.77, 18.55], [31.98, 20.22], [30.94, 21.83], [29.67, 23.30], [28.22, 24.57], [26.68, 25.60], [25.10, 26.39], [23.77, 26.91], [22.88, 27.22], [22.17, 27.50], [21.46, 27.81], [20.77, 28.14], [20.08, 28.50], [19.41, 28.87], [18.75, 29.28], [18.09, 29.71], [17.45, 30.16], [16.81, 30.63], [16.19, 31.12], [15.58, 31.64], [14.98, 32.18], [14.37, 32.75], [13.68, 33.43], [12.88, 34.21], [12.03, 34.99], [11.14, 35.77], [10.21, 36.54], [9.24, 37.29], [8.21, 38.03], [7.11, 38.75], [5.93, 39.44], [4.66, 40.09], [3.26, 40.69], [1.78, 41.18], [0.51, 41.50], [-0.49, 41.73], [-1.46, 41.96], [-2.43, 42.19], [-3.19, 42.37], [-4.17, 42.60], [-5.14, 42.83], [-6.11, 43.06], [-7.09, 43.29], [-8.06, 43.51], [-9.03, 43.74], [-10.01, 43.97] ],
++    kerbFlags: [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 ],
++    kerbLeft: [ [-32.01, 70.02], [-31.01, 70.10], [-30.02, 70.17], [-29.02, 70.24], [-28.02, 70.32], [-27.03, 70.39], [-26.03, 70.47], [-25.03, 70.54], [-24.03, 70.61], [-23.05, 70.90], [-22.07, 71.19], [-21.09, 71.48], [-20.11, 71.76], [-19.13, 72.05], [-18.14, 72.34], [-17.16, 72.63], [-16.17, 72.70], [-15.17, 72.77], [-14.17, 72.85], [-13.17, 72.92], [-12.17, 73.00], [-11.10, 73.07], [-9.94, 73.12], [-8.80, 73.14], [-7.66, 73.13], [-6.52, 73.08], [-5.41, 72.80], [-4.32, 72.49], [-3.25, 72.16], [-2.19, 71.81], [-1.15, 71.43], [-0.13, 71.04], [0.88, 70.63], [1.92, 70.42], [2.96, 70.19], [3.99, 69.94], [5.01, 69.68], [6.02, 69.41], [7.03, 69.12], [8.04, 68.82], [9.04, 68.51], [10.03, 68.19], [11.02, 67.85], [12.00, 67.51], [12.97, 67.16], [13.95, 66.80], [14.99, 66.63], [16.04, 66.45], [17.08, 66.26], [18.12, 66.06], [19.16, 65.85], [20.20, 65.64], [21.23, 65.41], [22.18, 64.99], [23.12, 64.55], [24.06, 64.12], [24.99, 63.67], [25.88, 63.25], [26.74, 62.84], [27.61, 62.45], [28.47, 62.06], [29.33, 61.69], [30.19, 61.32], [31.06, 60.97], [31.93, 60.63], [32.79, 60.31], [33.65, 60.00], [34.50, 59.71], [35.35, 59.45], [36.20, 59.20], [37.04, 58.97], [37.88, 58.77], [38.69, 58.60], [39.48, 58.46], [40.26, 58.35], [41.01, 58.28], [41.71, 58.25], [42.36, 58.26], [42.94, 58.32], [43.44, 58.40], [43.84, 58.51], [44.14, 58.64], [44.37, 58.77], [44.54, 58.91], [44.74, 59.14], [45.19, 59.76], [45.89, 60.67], [46.63, 61.57], [47.42, 62.47], [48.28, 63.37], [49.23, 64.26], [50.29, 65.15], [51.51, 66.00], [52.95, 66.80], [54.66, 67.46], [56.69, 67.84], [58.76, 67.79], [60.42, 67.44], [61.74, 67.05], [62.99, 66.58], [64.17, 66.05], [65.29, 65.49], [66.36, 64.88], [67.39, 64.25], [68.37, 63.59], [69.31, 62.91], [70.32, 62.13], [71.47, 61.09], [72.53, 59.87], [73.39, 58.64], [74.09, 57.42], [74.68, 56.22], [75.17, 55.04], [75.59, 53.88], [75.96, 52.74], [76.27, 51.61], [76.55, 50.50], [76.79, 49.39], [77.01, 48.30], [77.20, 47.21], [77.37, 46.13], [77.51, 45.05], [77.65, 43.99], [77.76, 42.92], [77.86, 41.86], [77.95, 40.80], [78.03, 39.76], [78.10, 38.72], [78.16, 37.70], [78.21, 36.67], [78.26, 35.63], [78.30, 34.59], [78.34, 33.55], [78.36, 32.50], [78.38, 31.44], [78.38, 30.38], [78.37, 29.30], [78.13, 28.21], [77.86, 27.11], [77.56, 25.99], [77.22, 24.83], [76.82, 23.62], [76.28, 22.28], [75.44, 20.72], [74.67, 19.58], [74.27, 18.97], [73.93, 18.30], [73.58, 17.53], [73.23, 16.70], [72.89, 15.84], [72.56, 14.96], [72.23, 14.06], [71.92, 13.15], [71.61, 12.24], [71.30, 11.31], [71.01, 10.39], [70.71, 9.45], [70.63, 8.45], [70.55, 7.45], [70.47, 6.45], [70.39, 5.41], [70.28, 4.33], [70.14, 3.23], [69.99, 2.13], [69.61, 1.09], [69.21, 0.05], [68.78, -0.98], [68.33, -2.00], [67.84, -3.03], [67.33, -4.05], [66.79, -5.06], [66.21, -6.07], [65.59, -7.06], [64.94, -8.05], [64.24, -9.02], [63.50, -9.97], [62.71, -10.91], [61.88, -11.81], [60.99, -12.69], [60.06, -13.54], [59.07, -14.34], [58.10, -15.05], [57.23, -15.65], [56.43, -16.21], [55.64, -16.77], [54.85, -17.34], [53.93, -17.74], [53.01, -18.14], [52.10, -18.55], [51.19, -18.96], [50.28, -19.38], [49.37, -19.80], [48.46, -20.23], [47.68, -20.83], [46.90, -21.43], [46.13, -22.04], [45.36, -22.65], [44.60, -23.27], [43.84, -23.89], [42.99, -24.58], [41.93, -25.35], [40.65, -26.08], [39.11, -26.69], [37.30, -27.00], [35.34, -26.87], [33.50, -26.25], [31.99, -25.31], [30.81, -24.24], [29.89, -23.14], [29.14, -22.04], [28.51, -20.95], [27.98, -19.88], [27.51, -18.82], [27.08, -17.76], [26.50, -16.78], [25.96, -15.80], [25.44, -14.83], [24.94, -13.88], [24.45, -12.93], [23.97, -11.96], [23.50, -10.99], [23.25, -9.96], [23.01, -8.92], [22.79, -7.87], [22.58, -6.82], [22.38, -5.77], [22.19, -4.70], [22.03, -3.62], [21.88, -2.55], [21.74, -1.46], [21.63, -0.37], [21.54, 0.74], [21.47, 1.85], [21.42, 2.96], [21.62, 4.09], [21.84, 5.22], [22.09, 6.34], [22.37, 7.45], [22.69, 8.56], [23.03, 9.57], [23.34, 10.42], [23.39, 11.23], [23.39, 12.00], [23.35, 12.74], [23.26, 13.42], [23.12, 14.04], [22.94, 14.59], [22.72, 15.06], [22.45, 15.47], [22.15, 15.83], [21.78, 16.15], [21.35, 16.44], [20.84, 16.69], [20.12, 16.96], [19.16, 17.30], [18.10, 17.71], [17.07, 18.17], [16.05, 18.65], [15.05, 19.17], [14.06, 19.72], [13.10, 20.31], [12.16, 20.92], [11.24, 21.56], [10.35, 22.23], [9.48, 22.92], [8.63, 23.64], [7.80, 24.37], [7.01, 25.13], [6.28, 25.84], [5.61, 26.49], [4.94, 27.11], [4.26, 27.70], [3.58, 28.26], [2.89, 28.80], [2.20, 29.29], [1.51, 29.75], [0.83, 30.15], [0.15, 30.50], [-0.50, 30.78], [-1.15, 31.00], [-1.96, 31.19], [-2.91, 31.41], [-3.89, 31.64], [-4.86, 31.87], [-5.62, 32.05], [-6.59, 32.28], [-7.57, 32.51], [-8.54, 32.74], [-9.51, 32.97], [-10.49, 33.20], [-11.46, 33.43], [-12.43, 33.65] ],
++    kerbRight: [ [-31.45, 62.44], [-30.45, 62.52], [-29.46, 62.59], [-28.46, 62.66], [-27.46, 62.74], [-26.46, 62.81], [-25.47, 62.89], [-24.47, 62.96], [-23.47, 63.03], [-22.46, 62.89], [-21.45, 62.75], [-20.43, 62.61], [-19.42, 62.47], [-18.41, 62.34], [-17.39, 62.20], [-16.38, 62.06], [-15.38, 62.13], [-14.39, 62.20], [-13.39, 62.28], [-12.39, 62.35], [-11.40, 62.42], [-10.48, 62.49], [-9.64, 62.53], [-8.78, 62.54], [-7.92, 62.53], [-7.06, 62.50], [-6.17, 62.66], [-5.27, 62.79], [-4.35, 62.91], [-3.43, 63.01], [-2.49, 63.08], [-1.54, 63.14], [-0.59, 63.18], [0.33, 62.99], [1.25, 62.78], [2.16, 62.56], [3.08, 62.33], [4.00, 62.08], [4.91, 61.82], [5.82, 61.55], [6.73, 61.27], [7.64, 60.97], [8.55, 60.67], [9.46, 60.35], [10.36, 60.02], [11.27, 59.69], [12.09, 59.14], [12.90, 58.59], [13.72, 58.03], [14.53, 57.47], [15.33, 56.90], [16.12, 56.32], [16.92, 55.73], [17.80, 55.34], [18.67, 54.94], [19.54, 54.53], [20.42, 54.11], [21.33, 53.67], [22.29, 53.22], [23.23, 52.79], [24.19, 52.36], [25.17, 51.94], [26.15, 51.52], [27.14, 51.13], [28.13, 50.74], [29.14, 50.36], [30.17, 49.99], [31.21, 49.64], [32.26, 49.31], [33.33, 48.99], [34.42, 48.70], [35.54, 48.43], [36.68, 48.19], [37.85, 47.98], [39.07, 47.82], [40.30, 47.71], [41.60, 47.65], [42.95, 47.68], [44.36, 47.81], [45.83, 48.08], [47.35, 48.51], [48.89, 49.17], [50.39, 50.05], [51.77, 51.16], [52.92, 52.40], [53.66, 53.39], [54.18, 54.07], [54.71, 54.71], [55.24, 55.31], [55.75, 55.85], [56.26, 56.33], [56.74, 56.73], [57.16, 57.03], [57.46, 57.21], [57.61, 57.27], [57.54, 57.27], [57.46, 57.26], [57.76, 57.18], [58.35, 57.00], [58.98, 56.77], [59.62, 56.48], [60.28, 56.15], [60.95, 55.77], [61.63, 55.34], [62.31, 54.89], [62.99, 54.40], [63.57, 53.96], [63.91, 53.67], [64.15, 53.38], [64.43, 52.96], [64.73, 52.45], [65.02, 51.85], [65.30, 51.19], [65.56, 50.46], [65.80, 49.70], [66.02, 48.90], [66.23, 48.08], [66.41, 47.23], [66.58, 46.36], [66.74, 45.48], [66.88, 44.59], [67.00, 43.68], [67.12, 42.76], [67.22, 41.84], [67.31, 40.91], [67.38, 39.97], [67.45, 39.03], [67.52, 38.06], [67.57, 37.09], [67.63, 36.12], [67.67, 35.16], [67.71, 34.20], [67.74, 33.25], [67.77, 32.29], [67.78, 31.35], [67.78, 30.42], [67.77, 29.50], [67.96, 28.59], [68.14, 27.69], [68.29, 26.82], [68.41, 25.98], [68.51, 25.22], [68.60, 24.61], [68.74, 24.30], [68.35, 23.82], [67.68, 22.74], [67.10, 21.63], [66.62, 20.59], [66.19, 19.57], [65.80, 18.58], [65.43, 17.59], [65.07, 16.60], [64.73, 15.62], [64.40, 14.64], [64.08, 13.67], [63.76, 12.69], [63.46, 11.72], [62.95, 10.81], [62.45, 9.89], [61.95, 8.98], [61.47, 8.10], [60.99, 7.27], [60.50, 6.47], [60.00, 5.68], [59.70, 4.84], [59.37, 4.01], [59.03, 3.19], [58.68, 2.39], [58.31, 1.61], [57.92, 0.84], [57.52, 0.09], [57.10, -0.64], [56.67, -1.34], [56.22, -2.02], [55.74, -2.68], [55.26, -3.30], [54.76, -3.89], [54.24, -4.46], [53.70, -4.99], [53.16, -5.49], [52.59, -5.95], [51.95, -6.42], [51.17, -6.95], [50.33, -7.54], [49.49, -8.14], [48.66, -8.73], [47.96, -9.51], [47.25, -10.28], [46.56, -11.06], [45.87, -11.84], [45.18, -12.63], [44.50, -13.41], [43.82, -14.20], [43.01, -14.83], [42.21, -15.45], [41.41, -16.08], [40.62, -16.72], [39.82, -17.35], [39.03, -17.99], [38.33, -18.57], [37.78, -18.98], [37.33, -19.25], [37.02, -19.38], [36.87, -19.42], [36.83, -19.42], [36.78, -19.39], [36.60, -19.27], [36.31, -18.99], [35.95, -18.56], [35.58, -18.00], [35.21, -17.36], [34.85, -16.64], [34.51, -15.87], [34.19, -15.07], [34.10, -14.17], [34.02, -13.25], [33.96, -12.31], [33.90, -11.34], [33.85, -10.37], [33.82, -9.40], [33.79, -8.43], [33.57, -7.52], [33.36, -6.61], [33.16, -5.70], [32.98, -4.79], [32.81, -3.88], [32.65, -2.98], [32.51, -2.08], [32.39, -1.17], [32.28, -0.28], [32.18, 0.62], [32.11, 1.51], [32.05, 2.40], [32.02, 3.28], [31.79, 4.15], [31.58, 5.02], [31.39, 5.90], [31.23, 6.79], [31.10, 7.67], [31.00, 8.64], [30.91, 9.78], [30.98, 10.97], [30.99, 12.19], [30.92, 13.46], [30.74, 14.75], [30.44, 16.08], [29.99, 17.43], [29.36, 18.76], [28.54, 20.03], [27.54, 21.19], [26.40, 22.18], [25.17, 23.00], [23.89, 23.65], [22.74, 24.09], [21.82, 24.42], [21.02, 24.73], [20.22, 25.08], [19.43, 25.46], [18.66, 25.86], [17.90, 26.28], [17.15, 26.74], [16.41, 27.22], [15.69, 27.72], [14.98, 28.25], [14.29, 28.80], [13.61, 29.37], [12.95, 29.97], [12.29, 30.59], [11.59, 31.28], [10.82, 32.02], [10.02, 32.76], [9.19, 33.48], [8.33, 34.19], [7.44, 34.89], [6.51, 35.56], [5.53, 36.20], [4.49, 36.81], [3.38, 37.38], [2.20, 37.88], [0.95, 38.30], [-0.19, 38.58], [-1.17, 38.81], [-2.15, 39.04], [-3.12, 39.27], [-3.88, 39.45], [-4.85, 39.68], [-5.83, 39.91], [-6.80, 40.14], [-7.77, 40.37], [-8.75, 40.59], [-9.72, 40.82], [-10.69, 41.05] ],
 +    barriers: [
 +        [ [-30.51, 69.27], [-25.19, 72.73], [-24.20, 72.81], [-23.20, 72.88], [-22.20, 72.96], [-21.20, 73.03], [-20.21, 73.10], [-19.21, 73.18], [-18.21, 73.25], [-17.22, 73.32], [-16.22, 73.40], [-15.22, 73.47], [-14.22, 73.55], [-13.23, 73.62], [-12.23, 73.69], [-11.14, 73.77], [-9.96, 73.82], [-8.80, 73.84], [-7.64, 73.83], [-6.49, 73.78], [-5.35, 73.71], [-4.21, 73.61], [-3.09, 73.49], [-1.98, 73.35], [-0.87, 73.18], [0.22, 73.00], [1.31, 72.79], [2.39, 72.57], [3.45, 72.33], [4.51, 72.08], [5.57, 71.81], [6.61, 71.53], [7.65, 71.23], [8.68, 70.93], [9.70, 70.61], [10.72, 70.27], [11.73, 69.93], [12.73, 69.58], [13.73, 69.23], [14.72, 68.86], [15.71, 68.48], [16.69, 68.09], [17.66, 67.70], [18.63, 67.30], [19.60, 66.89], [20.57, 66.47], [21.52, 66.05], [22.47, 65.63], [23.42, 65.19], [24.36, 64.75], [25.29, 64.30], [26.18, 63.88], [27.03, 63.48], [27.90, 63.08], [28.75, 62.70], [29.60, 62.33], [30.46, 61.97], [31.32, 61.62], [32.18, 61.29], [33.03, 60.97], [33.88, 60.66], [34.72, 60.38], [35.56, 60.11], [36.39, 59.87], [37.22, 59.65], [38.03, 59.45], [38.83, 59.28], [39.59, 59.15], [40.33, 59.05], [41.05, 58.98], [41.72, 58.95], [42.32, 58.96], [42.85, 59.01], [43.29, 59.09], [43.60, 59.17], [43.82, 59.26], [43.97, 59.35], [44.06, 59.42], [44.20, 59.58], [44.63, 60.18], [45.34, 61.10], [46.10, 62.02], [46.91, 62.94], [47.79, 63.87], [48.77, 64.79], [49.86, 65.70], [51.14, 66.59], [52.65, 67.43], [54.47, 68.13], [56.63, 68.54], [58.85, 68.48], [60.59, 68.12], [61.96, 67.71], [63.25, 67.23], [64.47, 66.69], [65.63, 66.10], [66.72, 65.48], [67.77, 64.83], [68.77, 64.16], [69.73, 63.47], [70.77, 62.67], [71.97, 61.58], [73.08, 60.30], [73.98, 59.01], [74.71, 57.75], [75.32, 56.51], [75.82, 55.30], [76.25, 54.11], [76.63, 52.94], [76.95, 51.79], [77.23, 50.66], [77.48, 49.53], [77.70, 48.42], [77.89, 47.32], [78.06, 46.23], [78.21, 45.14], [78.34, 44.07], [78.46, 42.99], [78.56, 41.92], [78.65, 40.86], [78.73, 39.80], [78.79, 38.77], [78.86, 37.74], [78.91, 36.70], [78.96, 35.66], [79.00, 34.62], [79.04, 33.57], [79.06, 32.52], [79.08, 31.45], [79.08, 30.38], [79.07, 29.29], [79.04, 28.18], [78.99, 27.04], [78.90, 25.87], [78.77, 24.63], [78.56, 23.29], [78.18, 21.71], [77.38, 19.69], [76.49, 18.36], [76.18, 17.87], [75.91, 17.34], [75.59, 16.64], [75.27, 15.87], [74.94, 15.05], [74.62, 14.20], [74.31, 13.33], [74.00, 12.44], [73.70, 11.54], [73.40, 10.63], [73.10, 9.72], [72.81, 8.80], [72.52, 7.87], [72.24, 6.94], [71.96, 6.00], [71.67, 5.03], [71.35, 3.99], [71.01, 2.93], [70.65, 1.89], [70.27, 0.84], [69.86, -0.21], [69.42, -1.25], [68.96, -2.29], [68.47, -3.34], [67.95, -4.37], [67.40, -5.40], [66.81, -6.43], [66.18, -7.44], [65.51, -8.45], [64.80, -9.43], [64.04, -10.41], [63.23, -11.37], [62.38, -12.30], [61.48, -13.20], [60.51, -14.07], [59.50, -14.89], [58.51, -15.62], [57.63, -16.23], [56.84, -16.78], [56.04, -17.34], [55.25, -17.91], [54.47, -18.48], [53.68, -19.05], [52.90, -19.63], [52.12, -20.21], [51.34, -20.79], [50.57, -21.38], [49.80, -21.97], [49.03, -22.56], [48.26, -23.16], [47.50, -23.76], [46.74, -24.37], [45.98, -24.98], [45.22, -25.59], [44.34, -26.31], [43.14, -27.19], [41.61, -28.06], [39.71, -28.80], [37.42, -29.20], [34.90, -29.03], [32.56, -28.23], [30.66, -27.06], [29.22, -25.76], [28.14, -24.47], [27.27, -23.21], [26.57, -21.99], [25.99, -20.82], [25.48, -19.67], [25.03, -18.54], [24.63, -17.43], [24.27, -16.34], [23.94, -15.28], [23.65, -14.25], [23.36, -13.22], [23.09, -12.19], [22.82, -11.16], [22.57, -10.12], [22.33, -9.07], [22.10, -8.01], [21.89, -6.95], [21.69, -5.89], [21.50, -4.81], [21.33, -3.73], [21.18, -2.64], [21.05, -1.54], [20.93, -0.43], [20.84, 0.68], [20.77, 1.81], [20.72, 2.94], [20.70, 4.09], [20.71, 5.24], [20.75, 6.40], [20.82, 7.57], [20.93, 8.75], [21.05, 9.80], [21.14, 10.61], [21.19, 11.30], [21.19, 11.95], [21.16, 12.53], [21.10, 13.03], [21.00, 13.45], [20.90, 13.77], [20.80, 13.99], [20.69, 14.16], [20.59, 14.28], [20.45, 14.40], [20.24, 14.53], [19.95, 14.67], [19.36, 14.89], [18.38, 15.24], [17.26, 15.68], [16.15, 16.16], [15.07, 16.68], [14.00, 17.23], [12.95, 17.82], [11.93, 18.44], [10.93, 19.10], [9.96, 19.78], [9.01, 20.48], [8.08, 21.22], [7.18, 21.98], [6.31, 22.75], [5.48, 23.54], [4.75, 24.27], [4.10, 24.89], [3.47, 25.47], [2.84, 26.02], [2.21, 26.55], [1.58, 27.04], [0.96, 27.48], [0.35, 27.88], [-0.23, 28.22], [-0.78, 28.51], [-1.28, 28.72], [-1.76, 28.88], [-2.47, 29.05], [-3.42, 29.27], [-4.39, 29.50], [-5.36, 29.73], [-6.12, 29.91], [-4.22, 29.62] ],
 +        [ [-22.27, 61.11], [-24.31, 60.77], [-23.31, 60.84], [-22.31, 60.91], [-21.31, 60.99], [-20.32, 61.06], [-19.32, 61.14], [-18.32, 61.21], [-17.33, 61.28], [-16.33, 61.36], [-15.33, 61.43], [-14.33, 61.51], [-13.34, 61.58], [-12.34, 61.65], [-11.35, 61.73], [-10.44, 61.79], [-9.62, 61.83], [-8.78, 61.84], [-7.94, 61.83], [-7.09, 61.80], [-6.24, 61.74], [-5.38, 61.67], [-4.51, 61.58], [-3.64, 61.46], [-2.77, 61.33], [-1.89, 61.18], [-1.01, 61.02], [-0.13, 60.84], [0.75, 60.64], [1.64, 60.43], [2.52, 60.20], [3.41, 59.96], [4.30, 59.71], [5.18, 59.45], [6.07, 59.17], [6.95, 58.88], [7.83, 58.59], [8.72, 58.28], [9.61, 57.96], [10.49, 57.63], [11.37, 57.29], [12.25, 56.95], [13.13, 56.59], [14.01, 56.23], [14.88, 55.86], [15.75, 55.48], [16.63, 55.09], [17.51, 54.70], [18.37, 54.30], [19.24, 53.89], [20.12, 53.48], [21.03, 53.04], [21.99, 52.59], [22.95, 52.15], [23.91, 51.72], [24.90, 51.29], [25.89, 50.88], [26.88, 50.47], [27.88, 50.08], [28.90, 49.70], [29.94, 49.33], [30.99, 48.97], [32.06, 48.64], [33.14, 48.32], [34.25, 48.02], [35.38, 47.75], [36.54, 47.50], [37.75, 47.29], [38.99, 47.12], [40.26, 47.01], [41.59, 46.95], [42.99, 46.98], [44.45, 47.12], [45.98, 47.39], [47.59, 47.85], [49.21, 48.54], [50.79, 49.47], [52.25, 50.65], [53.46, 51.96], [54.22, 52.97], [54.73, 53.63], [55.24, 54.26], [55.75, 54.84], [56.25, 55.36], [56.73, 55.81], [57.17, 56.18], [57.53, 56.44], [57.62, 56.49], [58.13, 56.34], [58.71, 56.12], [59.32, 55.85], [59.95, 55.53], [60.60, 55.16], [61.25, 54.76], [61.91, 54.31], [62.57, 53.83], [63.12, 53.42], [63.41, 53.17], [63.60, 52.95], [63.84, 52.59], [64.11, 52.12], [64.38, 51.56], [64.65, 50.93], [64.90, 50.24], [65.13, 49.50], [65.35, 48.73], [65.55, 47.92], [65.73, 47.09], [65.90, 46.24], [66.05, 45.37], [66.18, 44.49], [66.31, 43.59], [66.42, 42.68], [66.52, 41.77], [66.61, 40.85], [66.69, 39.92], [66.75, 38.98], [66.82, 38.02], [66.87, 37.05], [66.93, 36.09], [66.97, 35.13], [67.01, 34.18], [67.04, 33.23], [67.07, 32.28], [67.08, 31.35], [67.08, 30.42], [67.07, 29.51], [67.05, 28.62], [67.01, 27.76], [66.95, 26.94], [66.87, 26.18], [66.77, 25.55], [66.71, 25.25], [66.53, 25.04], [65.77, 23.84], [65.12, 22.60], [64.61, 21.48], [64.16, 20.41], [63.75, 19.37], [63.36, 18.35], [63.00, 17.34], [62.65, 16.33], [62.31, 15.34], [61.99, 14.35], [61.67, 13.36], [61.36, 12.37], [61.05, 11.39], [60.75, 10.40], [60.46, 9.42], [60.18, 8.48], [59.91, 7.61], [59.64, 6.76], [59.34, 5.92], [59.04, 5.09], [58.72, 4.27], [58.39, 3.47], [58.04, 2.68], [57.68, 1.92], [57.30, 1.16], [56.91, 0.43], [56.50, -0.28], [56.08, -0.96], [55.64, -1.62], [55.18, -2.26], [54.72, -2.86], [54.24, -3.43], [53.73, -3.98], [53.22, -4.49], [52.70, -4.96], [52.16, -5.39], [51.54, -5.85], [50.77, -6.38], [49.93, -6.97], [49.09, -7.56], [48.25, -8.16], [47.42, -8.77], [46.59, -9.37], [45.76, -9.98], [44.93, -10.60], [44.11, -11.21], [43.29, -11.83], [42.48, -12.46], [41.66, -13.09], [40.85, -13.72], [40.05, -14.36], [39.24, -15.00], [38.44, -15.64], [37.64, -16.29], [37.29, -16.58], [37.15, -16.32], [36.84, -15.71], [36.54, -15.02], [36.25, -14.29], [35.97, -13.53], [35.71, -12.72], [35.45, -11.86], [35.19, -10.97], [34.94, -10.07], [34.70, -9.17], [34.47, -8.26], [34.25, -7.36], [34.04, -6.46], [33.85, -5.56], [33.67, -4.66], [33.50, -3.76], [33.34, -2.87], [33.21, -1.98], [33.08, -1.08], [32.97, -0.20], [32.88, 0.69], [32.81, 1.56], [32.75, 2.43], [32.72, 3.30], [32.70, 4.15], [32.71, 5.00], [32.74, 5.84], [32.79, 6.67], [32.86, 7.48], [32.97, 8.41], [33.10, 9.59], [33.18, 10.89], [33.19, 12.25], [33.11, 13.66], [32.91, 15.14], [32.56, 16.67], [32.03, 18.25], [31.28, 19.83], [30.30, 21.35], [29.10, 22.74], [27.74, 23.93], [26.28, 24.91], [24.78, 25.66], [23.50, 26.16], [22.59, 26.48], [21.86, 26.77], [21.13, 27.08], [20.41, 27.43], [19.70, 27.79], [19.01, 28.18], [18.32, 28.60], [17.64, 29.04], [16.98, 29.51], [16.33, 29.99], [15.68, 30.50], [15.05, 31.03], [14.43, 31.59], [13.82, 32.17], [13.13, 32.86], [12.33, 33.62], [11.49, 34.39], [10.62, 35.16], [9.71, 35.91], [8.76, 36.65], [7.75, 37.37], [6.69, 38.07], [5.55, 38.74], [4.32, 39.37], [2.98, 39.94], [1.56, 40.41], [0.33, 40.72], [-0.67, 40.95], [-1.64, 41.18], [-2.62, 41.41], [-3.38, 41.59], [-5.57, 41.36] ]
