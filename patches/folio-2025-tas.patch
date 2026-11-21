@@ -1173,7 +1173,7 @@ index 0000000..014c051
 +}
 diff --git a/sources/Game/TasEditor.js b/sources/Game/TasEditor.js
 new file mode 100644
-index 0000000..83a545f
+index 0000000..36c2f83
 --- /dev/null
 +++ b/sources/Game/TasEditor.js
 @@ -0,0 +1,1307 @@
@@ -1196,8 +1196,8 @@ index 0000000..83a545f
 +const NEUTRAL = Object.freeze({ throttle: 0, steer: 0, boost: false, brake: false, susp: null })
 +const STORAGE_KEY = 'bs-tas-autosave'
 +const COURSES = { circuit: 'Circuit', tour: 'Grand tour' }
-+// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A (1.4.x), 3 = île aplanie et piste à barrières (1.5.0), 4 = obstacles sur l'île (1.6.0))
-+const TRACKS = { tour: 4 }
++// Version du tracé (Grand tour : 1 = 1.3.0 sans barrières, 2 = tracé A (1.4.x), 3 = île aplanie et piste à barrières (1.5.0), 4 = obstacles sur l'île (1.6.0), 5 = rampes du circuit solides et île nettoyée (1.6.1))
++const TRACKS = { tour: 5 }
 +const SETTINGS_KEY = 'bs-tas-settings'
 +const FINE_INTERVAL = 5
 +const FINE_MAX = 12
@@ -3586,12 +3586,13 @@ index d6fd7e3..dda66cf 100644
                  crate.object.physical.body.setEnabled(true)
 diff --git a/sources/Game/World/Flatten.js b/sources/Game/World/Flatten.js
 new file mode 100644
-index 0000000..56aefef
+index 0000000..175009d
 --- /dev/null
 +++ b/sources/Game/World/Flatten.js
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,326 @@
 +import * as THREE from 'three/webgpu'
 +import { Game } from '../Game.js'
++import { grandTourIsland } from '../../data/grandTour.js'
 +
 +/**
 + * Île aplanie (Grand tour) : tout ce qui est hors du circuit de base est retiré pendant la course
@@ -3672,6 +3673,20 @@ index 0000000..56aefef
 +        this.trackFilled = filled / (n * n)
 +        if(this.trackFilled < 0.5)
 +            for(let k = 0; k < n * n; k++) if(track[k]) keep[k] = 1
++        // piste de l'île (et ses jonctions avec le circuit) : rien n'y est conservé, sauf la piste du circuit elle-même
++        {
++            const island = new Uint8Array(n * n)
++            const left = grandTourIsland.physLeft, right = grandTourIsland.physRight
++            for(let i = 0; i < left.length - 1; i++)
++            {
++                const ax = (left[i][0] + right[i][0]) / 2, az = (left[i][1] + right[i][1]) / 2
++                const bx = (left[i + 1][0] + right[i + 1][0]) / 2, bz = (left[i + 1][1] + right[i + 1][1]) / 2
++                const halfWidth = Math.hypot(left[i][0] - ax, left[i][1] - az)
++                mark(ax, az, bx, bz, halfWidth + 1.5, island)
++            }
++            for(let k = 0; k < n * n; k++)
++                if(island[k] && !(this.trackFilled < 0.5 && track[k])) keep[k] = 0
++        }
 +        // table cumulée
 +        const sum = new Int32Array((n + 1) * (n + 1))
 +        for(let iz = 0; iz < n; iz++)
@@ -3697,6 +3712,40 @@ index 0000000..56aefef
 +        if(x1 < x0 || z1 < z0) return false
 +        const w = n + 1
 +        return sum[(z1 + 1) * w + x1 + 1] - sum[z0 * w + x1 + 1] - sum[(z1 + 1) * w + x0] + sum[z0 * w + x0] > 0
++    }
++
++    // Un des colliders du corps touche-t-il la zone conservée ? (emprise au sol de chaque forme)
++    collidersTouch(body)
++    {
++        const corner = new THREE.Vector3(), quaternion = new THREE.Quaternion()
++        for(let i = 0; i < body.numColliders(); i++)
++        {
++            const collider = body.collider(i), t = collider.translation(), type = collider.shapeType()
++            let minX = t.x, maxX = t.x, minZ = t.z, maxZ = t.z
++            const grow = (x, z) => { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z) }
++            if(type === 6 || type === 9)
++            {
++                const v = collider.vertices()
++                for(let k = 0; k < v.length; k += 3) grow(v[k] + t.x, v[k + 2] + t.z)
++            }
++            else if(type === 1)
++            {
++                const he = collider.halfExtents(), r = collider.rotation()
++                quaternion.set(r.x, r.y, r.z, r.w)
++                for(const sx of [ -1, 1 ]) for(const sy of [ -1, 1 ]) for(const sz of [ -1, 1 ])
++                {
++                    corner.set(he.x * sx, he.y * sy, he.z * sz).applyQuaternion(quaternion)
++                    grow(t.x + corner.x, t.z + corner.z)
++                }
++            }
++            else
++            {
++                const radius = collider.radius?.() || 0
++                grow(t.x - radius, t.z - radius); grow(t.x + radius, t.z + radius)
++            }
++            if(this.touchesBox(minX, minZ, maxX, maxZ)) return true
++        }
++        return false
 +    }
 +
 +    // Éléments à ne jamais toucher (sol, eau, herbe, effets, voiture, circuit…)
@@ -3765,6 +3814,7 @@ index 0000000..56aefef
 +
 +        // 1. Objets du jeu (physique + affichage)
 +        this.disabledObjects = []
++        this.keptVisuals = new Set()
 +        const box = new THREE.Box3()
 +        objects.list.forEach((object) =>
 +        {
@@ -3779,7 +3829,18 @@ index 0000000..56aefef
 +            }
 +            else
 +                touches = this.keepsPoint(body.translation().x, body.translation().z)
-+            if(touches) return
++            // le visuel peut être ailleurs que la physique (rampes du circuit : visuel dans le décor, collider seul) :
++            // on garde aussi l'objet si un de ses colliders touche la zone
++            if(!touches && this.collidersTouch(body))
++            {
++                if(object.visual?.object3D) this.keptVisuals.add(object.visual.object3D)
++                return
++            }
++            if(touches)
++            {
++                if(object.visual?.object3D) this.keptVisuals.add(object.visual.object3D)
++                return
++            }
 +            objects.disable(object)
 +            this.disabledObjects.push(object)
 +        })
@@ -3792,7 +3853,7 @@ index 0000000..56aefef
 +        const matrix = new THREE.Matrix4(), position = new THREE.Vector3()
 +        const visit = (node) =>
 +        {
-+            if(excluded.has(node)) return
++            if(excluded.has(node) || this.keptVisuals.has(node)) return
 +            box.setFromObject(node)
 +            if(box.isEmpty())
 +            {
