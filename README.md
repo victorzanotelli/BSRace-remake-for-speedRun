@@ -53,6 +53,9 @@ Circuit 0 → 7 → *sortie* → Bowling → Accueil → Toilettes → Succès �
 
 ![Obstacles](docs/grand-tour-obstacles.png)
 
+- **Correctifs 1.6.1** :
+  - les rampes du circuit restent solides pendant le Grand tour : leur collider est conservé, même quand l'objet n'a pas de visuel à cet endroit ;
+  - aucun élément de décor n'est conservé sur la piste de l'île ni à ses jonctions avec le circuit.
 - **Île aplanie** pendant la course : tout ce qui est hors du circuit de base disparaît (arbres, buissons, rochers, bâtiments et décor des zones, objets mobiles). Tout revient à la fin de la course ; le Circuit et la balade ne sont pas touchés. L'eau est gardée : la route de l'île passe dessus, au niveau du sol.
 - Départ : le point « **Grand tour!** », juste à côté de « Start race! » (6 m plus loin).
 - **Ordre imposé** : seule la prochaine porte est active (surlignée) ; une porte franchie dans le désordre ne compte pas.
@@ -60,8 +63,8 @@ Circuit 0 → 7 → *sortie* → Bowling → Accueil → Toilettes → Succès �
 - Le compteur affiche `portes franchies / 20` et, dans l'éditeur, le nom de la prochaine porte.
 - En eau profonde, la voiture est replacée devant la dernière porte franchie.
 - Le classement en ligne et le succès « circuit rapide » restent réservés au Circuit.
-- Temps de référence : `grand-tour-demo-pilote-auto.json`, un movie produit par un pilote automatique (suivi de trajectoire, avec recherche du bon moment de passage devant les murs et les barres, sans autre optimisation) : **1:10.700**. Il est battable : c'est un premier objectif et la preuve que le parcours se boucle.
-- Les movies du Grand tour des versions 1.3 à 1.5 (anciens tracés, sans obstacles) ne se rejouent plus : l'éditeur prévient à l'ouverture.
+- Temps de référence : `grand-tour-demo-pilote-auto.json`, un movie produit par un pilote automatique (suivi de trajectoire, avec recherche du bon moment de passage devant les murs et les barres, sans autre optimisation) : **1:10.783**. Il est battable : c'est un premier objectif et la preuve que le parcours se boucle.
+- Les movies du Grand tour des versions 1.3 à 1.6.0 (anciens tracés) ne se rejouent plus : l'éditeur prévient à l'ouverture.
 
 ## L'éditeur TAS
 
@@ -129,7 +132,7 @@ Le menu déroulant en haut de l'éditeur bascule entre **Circuit** et **Grand to
 ```
 
 - `course` : `"circuit"` ou `"tour"` (absent = circuit, pour les anciens movies).
-- `track` : version du tracé du Grand tour (`4` = tracé B avec obstacles depuis 1.6.0 ; `3` = tracé B sans obstacles de la 1.5.0 ; `2` = tracé A des versions 1.4 ; absent = tracé de la 1.3.0).
+- `track` : version du tracé du Grand tour (`5` = depuis 1.6.1 (rampes du circuit solides, île nettoyée) ; `4` = tracé B avec obstacles de la 1.6.0 ; `3` = tracé B sans obstacles de la 1.5.0 ; `2` = tracé A des versions 1.4 ; absent = tracé de la 1.3.0).
 - Version 2 : l'entrée 0 est celle de l'image du départ. Les movies en version 1 (éditeur 1.1.0) restent lisibles : une image neutre est ajoutée au début à l'ouverture, pour garder le même timing.
 - `gaz` : -1 à 1.
 - `direction` : -1 à 1 ; **+1 = gauche**, -1 = droite (convention du jeu).
